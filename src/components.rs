@@ -54,9 +54,9 @@ pub(crate) fn header(
         )
         .child(div().flex_1())
         .child(div().text_sm().child(if connected {
-            "Spotify conectado"
+            "Catálogo Audius"
         } else {
-            "Spotify Desktop"
+            "Player iniciando"
         }))
 }
 

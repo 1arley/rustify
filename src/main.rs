@@ -1,9 +1,10 @@
 mod app;
+mod audius;
 mod components;
 mod design;
 mod home;
+mod library;
 mod playback;
-mod spotify;
 
 fn main() {
     app::run();

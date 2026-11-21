@@ -5,9 +5,9 @@ mod config;
 use std::time::Duration;
 
 use serde::Deserialize;
-use url::Url;
 
 pub(crate) use api::Track;
+pub(crate) use api::{ApiPage, Playlist};
 
 pub(crate) fn client_id() -> Option<String> {
     config::load_client_id()
@@ -22,9 +22,41 @@ pub(crate) fn connect(client_id: &str) -> Result<(), String> {
 }
 
 pub(crate) fn search_tracks(client_id: &str, query: &str) -> Result<Vec<Track>, String> {
-    let access_token = auth::access_token(client_id)?;
-    match api::search_tracks(&access_token, query) {
-        Ok(tracks) => Ok(tracks),
+    with_access_token(client_id, |token| api::search_tracks(token, query))
+}
+
+pub(crate) fn is_valid_track_uri(uri: &str) -> bool {
+    let Some(id) = uri.strip_prefix("spotify:track:") else {
+        return false;
+    };
+    is_valid_id(id)
+}
+
+pub(crate) fn saved_tracks(client_id: &str, offset: u32) -> Result<ApiPage<Track>, String> {
+    with_access_token(client_id, |token| api::saved_tracks(token, offset))
+}
+
+pub(crate) fn playlists(client_id: &str, offset: u32) -> Result<ApiPage<Playlist>, String> {
+    with_access_token(client_id, |token| api::playlists(token, offset))
+}
+
+pub(crate) fn playlist_tracks(
+    client_id: &str,
+    playlist_id: &str,
+    offset: u32,
+) -> Result<ApiPage<Track>, String> {
+    with_access_token(client_id, |token| {
+        api::playlist_tracks(token, playlist_id, offset)
+    })
+}
+
+fn with_access_token<T>(
+    client_id: &str,
+    request: impl Fn(&str) -> Result<T, api::ApiFailure>,
+) -> Result<T, String> {
+    let token = auth::access_token(client_id)?;
+    match request(&token) {
+        Ok(value) => Ok(value),
         Err(error) if error.unauthorized => {
             let refreshed = match auth::refresh_access_token(client_id) {
                 Ok(token) => token,
@@ -33,8 +65,8 @@ pub(crate) fn search_tracks(client_id: &str, query: &str) -> Result<Vec<Track>, 
                     return Err(error);
                 }
             };
-            match api::search_tracks(&refreshed, query) {
-                Ok(tracks) => Ok(tracks),
+            match request(&refreshed) {
+                Ok(value) => Ok(value),
                 Err(error) => {
                     if error.unauthorized {
                         let _ = auth::clear_token(client_id);
@@ -47,10 +79,7 @@ pub(crate) fn search_tracks(client_id: &str, query: &str) -> Result<Vec<Track>, 
     }
 }
 
-pub(crate) fn is_valid_track_uri(uri: &str) -> bool {
-    let Some(id) = uri.strip_prefix("spotify:track:") else {
-        return false;
-    };
+fn is_valid_id(id: &str) -> bool {
     id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
@@ -89,13 +118,4 @@ fn api_message(body: &str) -> Option<String> {
         .ok()?
         .error?
         .message
-}
-
-fn search_url(query: &str) -> Url {
-    let mut url = Url::parse("https://api.spotify.com/v1/search").expect("static API URL");
-    url.query_pairs_mut()
-        .append_pair("q", query)
-        .append_pair("type", "track")
-        .append_pair("limit", "10");
-    url
 }

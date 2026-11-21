@@ -7,13 +7,13 @@ pub(crate) fn playback_summary(state: &PlaybackState) -> impl IntoElement {
         if state.connected {
             "Nada tocando"
         } else {
-            "Spotify Desktop desconectado"
+            "Player de áudio indisponível"
         }
     } else {
         &state.title
     };
     let artist = if state.artist.is_empty() {
-        "Abra o Spotify Desktop para começar a ouvir"
+        "Pesquise no catálogo Audius para começar a ouvir"
     } else {
         &state.artist
     };

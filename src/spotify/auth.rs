@@ -15,14 +15,17 @@ use super::{http_agent, status_error};
 const KEYRING_SERVICE: &str = "rea-spotify";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const REDIRECT_BASE: &str = "http://127.0.0.1";
+const REQUIRED_SCOPES: &str = "user-read-private user-library-read playlist-read-private";
 
 pub(super) fn connect(client_id: &str) -> Result<(), String> {
     if let Some(token) = load_token(client_id)? {
-        if token.expires_at > unix_time().saturating_add(30) {
+        if has_required_scopes(&token.scope) && token.expires_at > unix_time().saturating_add(30) {
             return Ok(());
         }
-        if let Ok(token) = refresh_token(client_id, &token.refresh_token) {
-            return save_token(client_id, &token);
+        if has_required_scopes(&token.scope)
+            && let Ok(refreshed) = refresh_token(client_id, &token.refresh_token, &token.scope)
+        {
+            return save_token(client_id, &refreshed);
         }
     }
 
@@ -34,11 +37,14 @@ pub(super) fn access_token(client_id: &str) -> Result<String, String> {
     let token = load_token(client_id)?.ok_or_else(|| {
         "Conecte sua conta Spotify antes de pesquisar. Use o botão Conectar Spotify.".to_owned()
     })?;
+    if !has_required_scopes(&token.scope) {
+        return Err("Reconecte sua conta para liberar biblioteca e playlists.".to_owned());
+    }
     if token.expires_at > unix_time().saturating_add(30) {
         return Ok(token.access_token);
     }
 
-    let refreshed = refresh_token(client_id, &token.refresh_token)?;
+    let refreshed = refresh_token(client_id, &token.refresh_token, &token.scope)?;
     let access_token = refreshed.access_token.clone();
     save_token(client_id, &refreshed)?;
     Ok(access_token)
@@ -47,7 +53,10 @@ pub(super) fn access_token(client_id: &str) -> Result<String, String> {
 pub(super) fn refresh_access_token(client_id: &str) -> Result<String, String> {
     let token =
         load_token(client_id)?.ok_or_else(|| "Conecte sua conta Spotify novamente.".to_owned())?;
-    let refreshed = refresh_token(client_id, &token.refresh_token)?;
+    if !has_required_scopes(&token.scope) {
+        return Err("Reconecte sua conta para liberar biblioteca e playlists.".to_owned());
+    }
+    let refreshed = refresh_token(client_id, &token.refresh_token, &token.scope)?;
     let access_token = refreshed.access_token.clone();
     save_token(client_id, &refreshed)?;
     Ok(access_token)
@@ -88,6 +97,7 @@ fn authorize(client_id: &str) -> Result<TokenRecord, String> {
         .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("scope", REQUIRED_SCOPES)
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", &challenge)
         .append_pair("state", &state);
@@ -104,7 +114,7 @@ fn authorize(client_id: &str) -> Result<TokenRecord, String> {
         .append_pair("code", &code)
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("code_verifier", &verifier);
-    request_token(&form.finish(), None)
+    request_token(&form.finish(), None, "")
 }
 
 fn authorization_code(
@@ -192,15 +202,23 @@ fn respond(stream: &mut TcpStream, title: &str, status: u16) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn refresh_token(client_id: &str, refresh_token: &str) -> Result<TokenRecord, String> {
+fn refresh_token(
+    client_id: &str,
+    refresh_token: &str,
+    existing_scope: &str,
+) -> Result<TokenRecord, String> {
     let mut form = url::form_urlencoded::Serializer::new(String::new());
     form.append_pair("client_id", client_id)
         .append_pair("grant_type", "refresh_token")
         .append_pair("refresh_token", refresh_token);
-    request_token(&form.finish(), Some(refresh_token))
+    request_token(&form.finish(), Some(refresh_token), existing_scope)
 }
 
-fn request_token(form: &str, existing_refresh_token: Option<&str>) -> Result<TokenRecord, String> {
+fn request_token(
+    form: &str,
+    existing_refresh_token: Option<&str>,
+    existing_scope: &str,
+) -> Result<TokenRecord, String> {
     let mut response = http_agent()
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -235,8 +253,16 @@ fn request_token(form: &str, existing_refresh_token: Option<&str>) -> Result<Tok
     Ok(TokenRecord {
         access_token: response.access_token,
         refresh_token,
+        scope: response.scope.unwrap_or_else(|| existing_scope.to_owned()),
         expires_at: unix_time().saturating_add(response.expires_in),
     })
+}
+
+fn has_required_scopes(scope: &str) -> bool {
+    let granted = scope.split_whitespace().collect::<Vec<_>>();
+    REQUIRED_SCOPES
+        .split_whitespace()
+        .all(|required| granted.contains(&required))
 }
 
 fn load_token(client_id: &str) -> Result<Option<TokenRecord>, String> {
@@ -272,6 +298,8 @@ struct TokenRecord {
     access_token: String,
     refresh_token: String,
     expires_at: u64,
+    #[serde(default)]
+    scope: String,
 }
 
 #[derive(Deserialize)]
@@ -279,6 +307,7 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: u64,
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]

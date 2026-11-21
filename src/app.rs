@@ -1,42 +1,57 @@
+use crate::audius::{self, Track};
 use crate::components::{artwork, header, status_card};
 use crate::design::{BLACK, CARD, MUTED, SURFACE};
 use crate::home::playback_summary;
-use crate::playback::{self, PlaybackCommand, PlaybackState};
-use crate::spotify::{self, Track};
+use crate::library;
+use crate::playback::{self, PlaybackCommand, PlaybackItem, PlaybackState, QueueCommand};
 use gpui::{
-    App, Application, Bounds, Context, Render, Subscription, Timer, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    AnyElement, App, Application, Bounds, Context, Render, Subscription, Timer, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{
     Root,
     button::{Button, ButtonVariants},
 };
 use std::time::Duration;
 
+fn playback_item(track: &Track) -> PlaybackItem {
+    PlaybackItem {
+        url: track.stream_url(),
+        title: track.name.clone(),
+        artist: track.artist_names().to_owned(),
+        duration: track.duration_micros(),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActivePage {
+    Search,
+    Library,
+    Queue,
+}
+
 struct Home {
     playback: PlaybackState,
-    client_id: String,
     search_input: gpui::Entity<InputState>,
-    client_id_input: gpui::Entity<InputState>,
     _search_subscription: Subscription,
     results: Vec<Track>,
+    active_page: ActivePage,
+    liked_tracks: Vec<Track>,
+    library_loaded: bool,
+    library_error: Option<String>,
     searching: bool,
-    connecting: bool,
-    connected_account: bool,
     message: Option<String>,
 }
 
 impl Home {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let client_id = spotify::client_id().unwrap_or_default();
+        let (liked_tracks, library_loaded, library_error) = match library::load_liked_tracks() {
+            Ok(tracks) => (tracks, true, None),
+            Err(error) => (Vec::new(), false, Some(error)),
+        };
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("O que você quer ouvir?"));
-        let client_id_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Client ID do Spotify Developer Dashboard")
-                .default_value(client_id.clone())
-        });
         let _search_subscription = cx.subscribe(&search_input, |this, _, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.search(cx);
@@ -45,14 +60,14 @@ impl Home {
 
         Self {
             playback: PlaybackState::default(),
-            client_id,
             search_input,
-            client_id_input,
             _search_subscription,
             results: Vec::new(),
+            active_page: ActivePage::Search,
+            liked_tracks,
+            library_loaded,
+            library_error,
             searching: false,
-            connecting: false,
-            connected_account: false,
             message: None,
         }
     }
@@ -102,80 +117,17 @@ impl Home {
         .detach();
     }
 
-    fn save_client_id(&mut self, cx: &mut Context<Self>) {
-        let value = self.client_id_input.read(cx).value().to_string();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { spotify::save_client_id(&value) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                match result {
-                    Ok(client_id) => {
-                        view.client_id = client_id;
-                        view.connected_account = false;
-                        view.message =
-                            Some("Client ID salvo. Agora conecte sua conta Spotify.".to_owned());
-                    }
-                    Err(error) => view.message = Some(error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn connect_account(&mut self, cx: &mut Context<Self>) {
-        if self.connecting {
-            return;
-        }
-        if self.client_id.is_empty() {
-            self.message =
-                Some("Configure primeiro o Client ID do Spotify Developer Dashboard.".to_owned());
-            cx.notify();
-            return;
-        }
-
-        let client_id = self.client_id.clone();
-        self.connecting = true;
-        self.message = Some("Aguardando autorização do Spotify no navegador…".to_owned());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { spotify::connect(&client_id) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.connecting = false;
-                match result {
-                    Ok(()) => {
-                        view.connected_account = true;
-                        view.message =
-                            Some("Conta Spotify conectada. Pesquise uma faixa acima.".to_owned());
-                    }
-                    Err(error) => view.message = Some(error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     fn search(&mut self, cx: &mut Context<Self>) {
+        self.active_page = ActivePage::Search;
         if self.searching {
             return;
         }
         let query = self.search_input.read(cx).value().trim().to_owned();
         if query.is_empty() {
-            return;
-        }
-        if self.client_id.is_empty() {
-            self.message = Some("Configure o Client ID do Spotify antes de pesquisar.".to_owned());
             cx.notify();
             return;
         }
 
-        let client_id = self.client_id.clone();
         self.searching = true;
         self.results.clear();
         self.message = None;
@@ -183,16 +135,16 @@ impl Home {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { spotify::search_tracks(&client_id, &query) })
+                .spawn(async move { audius::search_tracks(&query) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.searching = false;
                 match result {
                     Ok(results) => {
-                        view.connected_account = true;
                         view.results = results;
                         if view.results.is_empty() {
-                            view.message = Some("Nenhuma faixa encontrada.".to_owned());
+                            view.message =
+                                Some("Nenhuma faixa reproduzível encontrada.".to_owned());
                         }
                     }
                     Err(error) => view.message = Some(error),
@@ -203,13 +155,17 @@ impl Home {
         .detach();
     }
 
-    fn play_track(&mut self, uri: String, cx: &mut Context<Self>) {
-        self.message = Some("Abrindo faixa no Spotify Desktop…".to_owned());
-        cx.notify();
+    fn play_track(&mut self, queue: Vec<Track>, selected: usize, cx: &mut Context<Self>) {
+        let items = queue.iter().map(playback_item).collect();
+        self.play_items(items, selected, cx);
+    }
+
+    fn play_items(&mut self, items: Vec<PlaybackItem>, selected: usize, cx: &mut Context<Self>) {
+        self.message = None;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { playback::play_track(&uri) })
+                .spawn(async move { playback::play_tracks(items, selected) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.message = result.err();
@@ -219,48 +175,47 @@ impl Home {
         .detach();
     }
 
-    fn content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let client_field = Input::new(&self.client_id_input).w_full();
-        let rows = self
-            .results
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, track)| {
-                let uri = track.uri.clone();
-                let details = format!("{} · {}", track.artist_names(), track.album_name());
-                div()
-                    .id(("track-row", index))
-                    .w_full()
-                    .h(px(64.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_4()
-                    .rounded_md()
-                    .bg(rgb(CARD))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .overflow_hidden()
-                            .child(div().text_sm().child(track.name))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(details)),
-                    )
-                    .child(
-                        Button::new(("track-play", index))
-                            .ghost()
-                            .compact()
-                            .label("▶")
-                            .tooltip("Tocar faixa")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.play_track(uri.clone(), cx)),
-                            ),
-                    )
-            });
+    fn queue_action(&mut self, command: QueueCommand, cx: &mut Context<Self>) {
+        self.message = None;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { playback::update_queue(command) })
+                .await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |view, cx| {
+                    view.message = Some(error);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
 
+    fn toggle_liked(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.liked_tracks.iter().any(|liked| liked.id == track.id) {
+            self.liked_tracks.retain(|liked| liked.id != track.id);
+        } else {
+            self.liked_tracks.push(track);
+        }
+        if self.library_loaded {
+            match library::save_liked_tracks(&self.liked_tracks) {
+                Ok(()) => self.library_error = None,
+                Err(error) => {
+                    self.library_error = Some(error.clone());
+                    self.message = Some(error);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = match self.active_page {
+            ActivePage::Search => self.search_panel(cx),
+            ActivePage::Library => self.library_panel(cx),
+            ActivePage::Queue => self.queue_panel(cx),
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -268,99 +223,363 @@ impl Home {
             .overflow_scroll()
             .rounded_md()
             .bg(rgb(SURFACE))
+            .child(panel)
+    }
+
+    fn search_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.track_rows(&self.results, cx);
+        let content = if self.searching {
+            div()
+                .text_sm()
+                .text_color(rgb(MUTED))
+                .child("Pesquisando no catálogo Audius…")
+                .into_any_element()
+        } else if self.results.is_empty() && self.message.is_none() {
+            status_card(
+                "Encontre sua próxima música",
+                "Pesquise faixas de artistas independentes e toque o áudio aqui no app.",
+            )
+            .into_any_element()
+        } else {
+            rows.into_any_element()
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_6()
+            .py_8()
             .child(
                 div()
                     .w_full()
+                    .max_w(px(1000.0))
                     .flex()
-                    .justify_center()
-                    .px_6()
-                    .py_8()
+                    .flex_col()
+                    .gap_5()
+                    .child(playback_summary(&self.playback))
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(1000.0))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("CATÁLOGO AUDIUS"),
+                    )
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Busque e ouça música"),
+                    )
+                    .child(div().text_sm().text_color(rgb(MUTED)).child(
+                        "Busca e reprodução não exigem conta. As faixas abrem no player integrado.",
+                    ))
+                    .child(content)
+                    .child(self.message_card()),
+            )
+            .into_any_element()
+    }
+
+    fn library_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let content = if self.liked_tracks.is_empty() {
+            status_card(
+                "Sua biblioteca está vazia",
+                "Use o coração ao lado de uma faixa para salvá-la neste dispositivo.",
+            )
+            .into_any_element()
+        } else {
+            self.track_rows(&self.liked_tracks, cx).into_any_element()
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_6()
+            .py_8()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .child(playback_summary(&self.playback))
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Músicas curtidas"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child("Salvas neste dispositivo para as próximas sessões."),
+                    )
+                    .child(content)
+                    .child(self.message_card()),
+            )
+            .into_any_element()
+    }
+
+    fn queue_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let queue = self.playback.queue.clone();
+        let current_index = self.playback.current_index;
+        let content = if queue.is_empty() {
+            status_card(
+                "Sua fila está vazia",
+                "Adicione faixas pela busca ou inicie uma reprodução.",
+            )
+            .into_any_element()
+        } else {
+            let rows = queue.iter().enumerate().map(|(index, item)| {
+                let is_current = current_index == Some(index);
+                let can_edit = current_index.map_or(true, |current| index > current);
+                let first_upcoming = current_index.map_or(0, |current| current + 1);
+                let mut controls = div().flex().items_center().gap_1();
+                if can_edit {
+                    if index > first_upcoming {
+                        controls = controls.child(
+                            Button::new(("queue-up", index))
+                                .ghost()
+                                .compact()
+                                .label("↑")
+                                .tooltip("Mover para cima")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.queue_action(
+                                        QueueCommand::Move {
+                                            from: index,
+                                            to: index - 1,
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        );
+                    }
+                    if index + 1 < queue.len() {
+                        controls = controls.child(
+                            Button::new(("queue-down", index))
+                                .ghost()
+                                .compact()
+                                .label("↓")
+                                .tooltip("Mover para baixo")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.queue_action(
+                                        QueueCommand::Move {
+                                            from: index,
+                                            to: index + 1,
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        );
+                    }
+                    controls = controls.child(
+                        Button::new(("queue-remove", index))
+                            .ghost()
+                            .compact()
+                            .label("×")
+                            .tooltip("Remover da fila")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.queue_action(QueueCommand::Remove(index), cx)
+                            })),
+                    );
+                }
+                let playable_queue = queue.clone();
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .rounded_md()
+                    .bg(rgb(if is_current { 0x29362d } else { CARD }))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
                             .flex()
-                            .flex_col()
-                            .gap_5()
-                            .child(playback_summary(&self.playback))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child("SPOTIFY REAL"))
+                            .items_center()
+                            .gap_3()
                             .child(
                                 div()
-                                    .text_2xl()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child(if self.connected_account {
-                                        "Pesquise e ouça música"
+                                    .w(px(28.0))
+                                    .text_sm()
+                                    .text_color(rgb(if is_current { 0x1ed760 } else { MUTED }))
+                                    .child(if is_current {
+                                        "♫".to_owned()
                                     } else {
-                                        "Conecte sua conta Spotify"
+                                        (index + 1).to_string()
                                     }),
                             )
-                            .child(if self.client_id.is_empty() {
+                            .child(
                                 div()
+                                    .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .gap_3()
-                                    .child(div().text_sm().text_color(rgb(MUTED)).child(
-                                        "Crie um app no Spotify Developer Dashboard, cadastre http://127.0.0.1/callback como Redirect URI e cole o Client ID abaixo.",
-                                    ))
-                                    .child(div().text_xs().child("Client ID do Spotify"))
-                                    .child(client_field)
-                                    .child(self.action_button(
-                                        "Salvar Client ID",
-                                        "save-client-id",
-                                        cx.listener(|this, _, _, cx| this.save_client_id(cx)),
-                                    ))
-                            } else {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_4()
-                                    .child(div().text_sm().text_color(rgb(MUTED)).child(if self.connected_account {
-                                        "Busca pelo catálogo oficial; o áudio toca no Spotify Desktop instalado."
-                                    } else {
-                                        "A autorização usa OAuth PKCE e guarda tokens no chaveiro do sistema."
-                                    }))
-                                    .child(self.action_button(
-                                        if self.connecting {
-                                            "Conectando…"
-                                        } else if self.connected_account {
-                                            "Verificar conta"
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .child(div().text_sm().child(item.title.clone()))
+                                    .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                        if is_current {
+                                            format!("{} · Tocando", item.artist)
                                         } else {
-                                            "Conectar Spotify"
+                                            item.artist.clone()
                                         },
-                                        "connect-spotify",
-                                        cx.listener(|this, _, _, cx| this.connect_account(cx)),
-                                    ))
-                            })
-                            .child(if self.searching {
-                                div().text_sm().text_color(rgb(MUTED)).child("Pesquisando no catálogo Spotify…")
-                            } else {
-                                div().children(rows)
-                            })
-                            .child(if let Some(message) = &self.message {
-                                div()
-                                    .rounded_md()
-                                    .bg(rgb(0x292929))
-                                    .p_3()
-                                    .text_sm()
-                                    .child(message.clone())
-                            } else {
-                                div().child("")
-                            }),
-                    ),
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Button::new(("queue-play", index))
+                                    .primary()
+                                    .compact()
+                                    .label("▶")
+                                    .tooltip("Tocar a partir daqui")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.play_items(playable_queue.clone(), index, cx)
+                                    })),
+                            )
+                            .child(controls),
+                    )
+            });
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(rows)
+                .into_any_element()
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_6()
+            .py_8()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .child(playback_summary(&self.playback))
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(format!("Fila · {} faixas", queue.len())),
+                    )
+                    .child(content)
+                    .child(self.message_card()),
             )
+            .into_any_element()
     }
 
-    fn action_button(
-        &self,
-        label: &'static str,
-        id: &'static str,
-        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> impl IntoElement {
-        Button::new(id).primary().label(label).on_click(on_click)
+    fn track_rows(&self, tracks: &[Track], cx: &mut Context<Self>) -> gpui::Div {
+        let queue = tracks.to_vec();
+        let rows = tracks.iter().cloned().enumerate().map(|(index, track)| {
+            let is_liked = self.liked_tracks.iter().any(|liked| liked.id == track.id);
+            let favorite = track.clone();
+            let queue_item = playback_item(&track);
+            let permalink = track.permalink();
+            let playback_queue = queue.clone();
+            let genre = if track.album_name().is_empty() {
+                "Audius"
+            } else {
+                track.album_name()
+            };
+            let details = format!("{} · {genre}", track.artist_names());
+            div()
+                .id(("track-row", index))
+                .w_full()
+                .h(px(64.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .rounded_md()
+                .bg(rgb(CARD))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .overflow_hidden()
+                        .child(div().text_sm().child(track.name))
+                        .child(div().text_xs().text_color(rgb(MUTED)).child(details)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new(("track-like", index))
+                                .ghost()
+                                .compact()
+                                .label(if is_liked { "♥" } else { "♡" })
+                                .tooltip("Salvar na biblioteca local")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_liked(favorite.clone(), cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(("track-source", index))
+                                .ghost()
+                                .compact()
+                                .label("Audius ↗")
+                                .tooltip("Abrir faixa no Audius")
+                                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&permalink))),
+                        )
+                        .child(
+                            Button::new(("track-queue", index))
+                                .ghost()
+                                .compact()
+                                .label("+")
+                                .tooltip("Adicionar à fila")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.queue_action(QueueCommand::Enqueue(queue_item.clone()), cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(("track-play", index))
+                                .primary()
+                                .compact()
+                                .label("▶")
+                                .tooltip("Tocar no app")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.play_track(playback_queue.clone(), index, cx)
+                                })),
+                        ),
+                )
+        });
+        div().flex().flex_col().gap_1().children(rows)
     }
 
-    fn sidebar(&self) -> impl IntoElement {
+    fn message_card(&self) -> AnyElement {
+        if let Some(message) = self.message.as_ref().or(self.library_error.as_ref()) {
+            div()
+                .rounded_md()
+                .bg(rgb(0x292929))
+                .p_3()
+                .text_sm()
+                .child(message.clone())
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        }
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .w(px(272.0))
             .flex_none()
@@ -372,17 +591,90 @@ impl Home {
             .bg(rgb(SURFACE))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
+                    .id("nav-search")
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if self.active_page == ActivePage::Search {
+                        CARD
+                    } else {
+                        SURFACE
+                    }))
+                    .text_sm()
+                    .text_color(rgb(if self.active_page == ActivePage::Search {
+                        0xffffff
+                    } else {
+                        MUTED
+                    }))
+                    .child("Buscar")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.active_page = ActivePage::Search;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
                     .text_sm()
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("Sua Biblioteca"),
             )
-            .child(status_card(
-                "Biblioteca",
-                "Os itens da sua conta aparecerão aqui quando a Web API for configurada.",
-            ))
+            .child(
+                div()
+                    .id("nav-liked-songs")
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if self.active_page == ActivePage::Library {
+                        CARD
+                    } else {
+                        SURFACE
+                    }))
+                    .text_sm()
+                    .text_color(rgb(if self.active_page == ActivePage::Library {
+                        0xffffff
+                    } else {
+                        MUTED
+                    }))
+                    .child(format!("♡ Músicas curtidas ({})", self.liked_tracks.len()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.active_page = ActivePage::Library;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("nav-queue")
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if self.active_page == ActivePage::Queue {
+                        CARD
+                    } else {
+                        SURFACE
+                    }))
+                    .text_sm()
+                    .text_color(rgb(if self.active_page == ActivePage::Queue {
+                        0xffffff
+                    } else {
+                        MUTED
+                    }))
+                    .child(format!(
+                        "☷ Fila de reprodução ({})",
+                        self.playback.queue.len()
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.active_page = ActivePage::Queue;
+                        cx.notify();
+                    })),
+            )
     }
 
     fn player_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -390,16 +682,16 @@ impl Home {
             if self.playback.connected {
                 "Nada tocando"
             } else {
-                "Spotify Desktop desconectado"
+                "Player iniciando"
             }
         } else {
             &self.playback.title
         };
         let artist = if self.playback.artist.is_empty() {
             if self.playback.connected {
-                "Escolha uma música no Spotify"
+                "Pesquise uma faixa no Audius"
             } else {
-                "Abra o Spotify e escolha uma música"
+                "Aguarde o player de áudio iniciar"
             }
         } else {
             &self.playback.artist
@@ -611,7 +903,7 @@ impl Render for Home {
                     .flex_1()
                     .min_h_0()
                     .gap(px(4.0))
-                    .child(self.sidebar())
+                    .child(self.sidebar(cx))
                     .child(self.content(cx)),
             )
             .child(self.player_bar(cx))

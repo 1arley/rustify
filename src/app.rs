@@ -1,4 +1,4 @@
-use crate::audius::{self, Track};
+use crate::catalog::{Source, Track};
 use crate::components::{artwork, header, status_card};
 use crate::design::{BLACK, CARD, MUTED, SURFACE};
 use crate::home::playback_summary;
@@ -9,6 +9,7 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{
     Root,
     button::{Button, ButtonVariants},
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 fn playback_item(track: &Track) -> PlaybackItem {
     PlaybackItem {
-        url: track.stream_url(),
+        track_id: track.id.clone(),
         title: track.name.clone(),
         artist: track.artist_names().to_owned(),
         duration: track.duration_micros(),
@@ -26,12 +27,15 @@ fn playback_item(track: &Track) -> PlaybackItem {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActivePage {
+    Home,
     Search,
     Library,
     Queue,
 }
 
 struct Home {
+    seek: gpui::Entity<SliderState>,
+    volume: gpui::Entity<SliderState>,
     playback: PlaybackState,
     search_input: gpui::Entity<InputState>,
     _search_subscription: Subscription,
@@ -54,16 +58,32 @@ impl Home {
             cx.new(|cx| InputState::new(window, cx).placeholder("O que você quer ouvir?"));
         let _search_subscription = cx.subscribe(&search_input, |this, _, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                this.search(cx);
+                this.search(Source::Youtube, cx);
             }
         });
 
+        let seek = cx.new(|_| SliderState::new().max(100.).step(0.1));
+        let volume = cx.new(|_| SliderState::new().max(100.).default_value(50.));
+        for (slider, command) in [
+            (
+                &seek,
+                PlaybackCommand::SeekPercent as fn(f32) -> PlaybackCommand,
+            ),
+            (&volume, PlaybackCommand::Volume),
+        ] {
+            cx.subscribe(slider, move |this, _, SliderEvent::Change(value), cx| {
+                this.run_command(command(value.start()), cx)
+            })
+            .detach();
+        }
         Self {
+            seek,
+            volume,
             playback: PlaybackState::default(),
             search_input,
             _search_subscription,
             results: Vec::new(),
-            active_page: ActivePage::Search,
+            active_page: ActivePage::Home,
             liked_tracks,
             library_loaded,
             library_error,
@@ -117,7 +137,7 @@ impl Home {
         .detach();
     }
 
-    fn search(&mut self, cx: &mut Context<Self>) {
+    fn search(&mut self, source: Source, cx: &mut Context<Self>) {
         self.active_page = ActivePage::Search;
         if self.searching {
             return;
@@ -135,7 +155,7 @@ impl Home {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { audius::search_tracks(&query) })
+                .spawn(async move { source.search(&query) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.searching = false;
@@ -155,7 +175,7 @@ impl Home {
         .detach();
     }
 
-    fn play_track(&mut self, queue: Vec<Track>, selected: usize, cx: &mut Context<Self>) {
+    fn play_track(&mut self, queue: &[Track], selected: usize, cx: &mut Context<Self>) {
         let items = queue.iter().map(playback_item).collect();
         self.play_items(items, selected, cx);
     }
@@ -212,6 +232,17 @@ impl Home {
 
     fn content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = match self.active_page {
+            ActivePage::Home => div()
+                .p_6()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(div().text_2xl().child("Início"))
+                .child(playback_summary(&self.playback))
+                .child(div().child("Músicas curtidas"))
+                .child(self.track_rows(&self.liked_tracks, cx))
+                .child(self.message_card())
+                .into_any_element(),
             ActivePage::Search => self.search_panel(cx),
             ActivePage::Library => self.library_panel(cx),
             ActivePage::Queue => self.queue_panel(cx),
@@ -232,7 +263,7 @@ impl Home {
             div()
                 .text_sm()
                 .text_color(rgb(MUTED))
-                .child("Pesquisando no catálogo Audius…")
+                .child("Pesquisando faixas…")
                 .into_any_element()
         } else if self.results.is_empty() && self.message.is_none() {
             status_card(
@@ -262,7 +293,7 @@ impl Home {
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("CATÁLOGO AUDIUS"),
+                            .child("YOUTUBE E AUDIUS"),
                     )
                     .child(
                         div()
@@ -273,6 +304,13 @@ impl Home {
                     .child(div().text_sm().text_color(rgb(MUTED)).child(
                         "Busca e reprodução não exigem conta. As faixas abrem no player integrado.",
                     ))
+                    .child(
+                        Button::new("audius-search")
+                            .label("Pesquisar no Audius")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.search(Source::Audius, cx)),
+                            ),
+                    )
                     .child(content)
                     .child(self.message_card()),
             )
@@ -333,12 +371,17 @@ impl Home {
             .into_any_element()
         } else {
             let rows = queue.iter().enumerate().map(|(index, item)| {
+                let id = item.id;
+
+                let next = queue.get(index + 1).map(|e| e.id);
+                let item = &item.item;
                 let is_current = current_index == Some(index);
                 let can_edit = current_index.map_or(true, |current| index > current);
                 let first_upcoming = current_index.map_or(0, |current| current + 1);
                 let mut controls = div().flex().items_center().gap_1();
                 if can_edit {
                     if index > first_upcoming {
+                        let previous = queue[index - 1].id;
                         controls = controls.child(
                             Button::new(("queue-up", index))
                                 .ghost()
@@ -348,15 +391,15 @@ impl Home {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.queue_action(
                                         QueueCommand::Move {
-                                            from: index,
-                                            to: index - 1,
+                                            from: id,
+                                            to: previous,
                                         },
                                         cx,
                                     )
                                 })),
                         );
                     }
-                    if index + 1 < queue.len() {
+                    if let Some(next) = next {
                         controls = controls.child(
                             Button::new(("queue-down", index))
                                 .ghost()
@@ -364,13 +407,7 @@ impl Home {
                                 .label("↓")
                                 .tooltip("Mover para baixo")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.queue_action(
-                                        QueueCommand::Move {
-                                            from: index,
-                                            to: index + 1,
-                                        },
-                                        cx,
-                                    )
+                                    this.queue_action(QueueCommand::Move { from: id, to: next }, cx)
                                 })),
                         );
                     }
@@ -381,11 +418,11 @@ impl Home {
                             .label("×")
                             .tooltip("Remover da fila")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.queue_action(QueueCommand::Remove(index), cx)
+                                this.queue_action(QueueCommand::Remove(id), cx)
                             })),
                     );
                 }
-                let playable_queue = queue.clone();
+
                 div()
                     .w_full()
                     .min_h(px(60.0))
@@ -424,7 +461,17 @@ impl Home {
                                     .child(div().text_sm().child(item.title.clone()))
                                     .child(div().text_xs().text_color(rgb(MUTED)).child(
                                         if is_current {
-                                            format!("{} · Tocando", item.artist)
+                                            format!(
+                                                "{} · {}",
+                                                item.artist,
+                                                if self.playback.loading {
+                                                    "Carregando"
+                                                } else if self.playback.playing {
+                                                    "Tocando"
+                                                } else {
+                                                    "Selecionada"
+                                                }
+                                            )
                                         } else {
                                             item.artist.clone()
                                         },
@@ -443,7 +490,7 @@ impl Home {
                                     .label("▶")
                                     .tooltip("Tocar a partir daqui")
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.play_items(playable_queue.clone(), index, cx)
+                                        this.run_command(PlaybackCommand::Select(id), cx)
                                     })),
                             )
                             .child(controls),
@@ -484,7 +531,7 @@ impl Home {
     }
 
     fn track_rows(&self, tracks: &[Track], cx: &mut Context<Self>) -> gpui::Div {
-        let queue = tracks.to_vec();
+        let queue: std::rc::Rc<[Track]> = tracks.into();
         let rows = tracks.iter().cloned().enumerate().map(|(index, track)| {
             let is_liked = self.liked_tracks.iter().any(|liked| liked.id == track.id);
             let favorite = track.clone();
@@ -536,8 +583,8 @@ impl Home {
                             Button::new(("track-source", index))
                                 .ghost()
                                 .compact()
-                                .label("Audius ↗")
-                                .tooltip("Abrir faixa no Audius")
+                                .label("Origem ↗")
+                                .tooltip("Abrir página da faixa")
                                 .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&permalink))),
                         )
                         .child(
@@ -557,7 +604,7 @@ impl Home {
                                 .label("▶")
                                 .tooltip("Tocar no app")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.play_track(playback_queue.clone(), index, cx)
+                                    this.play_track(&playback_queue, index, cx)
                                 })),
                         ),
                 )
@@ -566,7 +613,13 @@ impl Home {
     }
 
     fn message_card(&self) -> AnyElement {
-        if let Some(message) = self.message.as_ref().or(self.library_error.as_ref()) {
+        if let Some(message) = self
+            .playback
+            .notice
+            .as_ref()
+            .or(self.message.as_ref())
+            .or(self.library_error.as_ref())
+        {
             div()
                 .rounded_md()
                 .bg(rgb(0x292929))
@@ -687,9 +740,11 @@ impl Home {
         } else {
             &self.playback.title
         };
-        let artist = if self.playback.artist.is_empty() {
+        let artist = if self.playback.loading {
+            "Carregando…"
+        } else if self.playback.artist.is_empty() {
             if self.playback.connected {
-                "Pesquise uma faixa no Audius"
+                "Pesquise uma faixa"
             } else {
                 "Aguarde o player de áudio iniciar"
             }
@@ -697,13 +752,6 @@ impl Home {
             &self.playback.artist
         };
         let mark: String = title.chars().take(2).collect();
-        let progress = if self.playback.duration > 0 {
-            (self.playback.position as f32 / self.playback.duration as f32).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let volume = self.playback.volume.clamp(0.0, 1.0) as f32;
-
         div()
             .h(px(76.0))
             .flex_none()
@@ -768,7 +816,9 @@ impl Home {
                                         cx,
                                     ))
                                     .child(self.control_button(
-                                        if self.playback.playing {
+                                        if self.playback.retry {
+                                            "Tentar novamente"
+                                        } else if self.playback.playing {
                                             "❚❚"
                                         } else {
                                             "▶"
@@ -809,18 +859,10 @@ impl Home {
                                     .text_color(rgb(MUTED))
                                     .child(playback::format_time(self.playback.position))
                                     .child(
-                                        div()
-                                            .w(px(360.0))
-                                            .h(px(4.0))
-                                            .rounded_full()
-                                            .bg(rgb(0x4b4b4b))
-                                            .child(
-                                                div()
-                                                    .w(px(360.0 * progress))
-                                                    .h_full()
-                                                    .rounded_full()
-                                                    .bg(rgb(0x1ed760)),
-                                            ),
+                                        div().w(px(360.0)).child(
+                                            Slider::new(&self.seek)
+                                                .disabled(self.playback.duration <= 0),
+                                        ),
                                     )
                                     .child(playback::format_time(self.playback.duration)),
                             ),
@@ -841,20 +883,9 @@ impl Home {
                                 false,
                                 cx,
                             ))
-                            .child(
-                                div()
-                                    .w(px(76.0))
-                                    .h(px(4.0))
-                                    .rounded_full()
-                                    .bg(rgb(0x4b4b4b))
-                                    .child(
-                                        div()
-                                            .w(px(76.0 * volume))
-                                            .h_full()
-                                            .rounded_full()
-                                            .bg(rgb(0xffffff)),
-                                    ),
-                            )
+                            .child(div().w(px(76.0)).child(
+                                Slider::new(&self.volume).disabled(!self.playback.connected),
+                            ))
                             .child(self.control_button(
                                 "+",
                                 "volume-up",
@@ -885,7 +916,21 @@ impl Home {
 }
 
 impl Render for Home {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = if self.playback.duration > 0 {
+            (self.playback.position as f32 / self.playback.duration as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let volume = self.playback.volume.clamp(0.0, 1.0) as f32;
+
+        for (slider, value) in [(&self.seek, progress), (&self.volume, volume)] {
+            slider.update(cx, |slider, cx| {
+                if slider.value().start() != value * 100. {
+                    slider.set_value(value * 100., window, cx);
+                }
+            });
+        }
         div()
             .size_full()
             .flex()
@@ -895,7 +940,11 @@ impl Render for Home {
             .child(header(
                 &self.search_input,
                 self.playback.connected,
-                cx.listener(|this, _, _, cx| this.search(cx)),
+                cx.listener(|this, _, _, cx| {
+                    this.active_page = ActivePage::Home;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _, cx| this.search(Source::Youtube, cx)),
             ))
             .child(
                 div()

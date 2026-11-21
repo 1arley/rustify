@@ -13,7 +13,7 @@ pub(crate) fn playback_summary(state: &PlaybackState) -> impl IntoElement {
         &state.title
     };
     let artist = if state.artist.is_empty() {
-        "Pesquise no catálogo Audius para começar a ouvir"
+        "Pesquise por uma faixa para começar a ouvir"
     } else {
         &state.artist
     };
@@ -27,7 +27,15 @@ pub(crate) fn playback_summary(state: &PlaybackState) -> impl IntoElement {
                 div()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("TOCANDO AGORA"),
+                    .child(if state.loading {
+                        "CARREGANDO"
+                    } else if state.retry {
+                        "FALHA NA REPRODUÇÃO"
+                    } else if state.playing {
+                        "TOCANDO AGORA"
+                    } else {
+                        "PLAYER"
+                    }),
             )
             .child(
                 div()

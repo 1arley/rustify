@@ -13,6 +13,7 @@ pub(crate) struct PlaybackState {
     pub playing: bool,
     pub title: String,
     pub artist: String,
+    pub artwork_url: Option<String>,
     pub position: i64,
     pub duration: i64,
     pub volume: f64,
@@ -23,6 +24,8 @@ pub(crate) struct PlaybackState {
     pub retry: bool,
     pub notice: Option<String>,
     pub current_index: Option<usize>,
+    pub suggesting: bool,
+    pub seed_title: Option<String>,
 }
 
 impl Default for PlaybackState {
@@ -32,6 +35,7 @@ impl Default for PlaybackState {
             playing: false,
             title: String::new(),
             artist: String::new(),
+            artwork_url: None,
             position: 0,
             duration: 0,
             volume: 0.5,
@@ -42,6 +46,8 @@ impl Default for PlaybackState {
             retry: false,
             notice: None,
             current_index: None,
+            suggesting: false,
+            seed_title: None,
         }
     }
 }
@@ -60,6 +66,7 @@ pub(crate) enum PlaybackCommand {
     VolumeUp,
     Shuffle,
     Repeat,
+    RefreshSuggestions,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +74,7 @@ pub(crate) struct PlaybackItem {
     pub track_id: TrackId,
     pub title: String,
     pub artist: String,
+    pub artwork_url: Option<String>,
     pub duration: i64,
 }
 
@@ -85,6 +93,10 @@ enum Request {
     ),
     Command(PlaybackCommand, mpsc::SyncSender<Result<(), String>>),
     Queue(QueueCommand, mpsc::SyncSender<Result<(), String>>),
+    Suggestions {
+        generation: u64,
+        items: Result<Vec<PlaybackItem>, String>,
+    },
 }
 
 struct Player {
@@ -146,9 +158,10 @@ fn player() -> &'static Player {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(PlaybackState::default()));
         let worker_state = state.clone();
+        let worker_sender = sender.clone();
         let startup_error = thread::Builder::new()
             .name("rea-audio".to_owned())
-            .spawn(move || run_player(receiver, worker_state))
+            .spawn(move || run_player(receiver, worker_sender, worker_state))
             .err()
             .map(|error| format!("Não foi possível iniciar o motor de áudio: {error}"));
         Player {
@@ -192,8 +205,54 @@ struct Worker {
     automatic: bool,
     notice: Option<String>,
     volume: f64,
+    sender: mpsc::Sender<Request>,
+    generation: u64,
+    suggesting: bool,
+    exhausted_at_len: Option<usize>,
 }
 impl Worker {
+    fn maybe_request_suggestions(&mut self) {
+        if self.suggesting
+            || self.queue.repeat != crate::queue::Repeat::Off
+            || self.queue.upcoming_count() >= 3
+            || self.exhausted_at_len == Some(self.queue.entries.len())
+        {
+            return;
+        }
+        let Some(seed) = self.queue.seed.clone().or_else(|| {
+            self.queue
+                .index()
+                .map(|i| self.queue.entries[i].item.clone())
+        }) else {
+            return;
+        };
+        let exclude = self.queue.seen_tracks();
+        self.suggesting = true;
+        let generation = self.generation;
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let items = crate::catalog::recommend_tracks(
+                &seed.track_id,
+                &seed.title,
+                &seed.artist,
+                seed.duration,
+                &exclude,
+            )
+            .map(|tracks| {
+                tracks
+                    .into_iter()
+                    .map(|track| PlaybackItem {
+                        track_id: track.id.clone(),
+                        title: track.name.clone(),
+                        artist: track.artist_names().to_owned(),
+                        artwork_url: track.artwork_url(),
+                        duration: track.duration_micros(),
+                    })
+                    .collect()
+            });
+            let _ = sender.send(Request::Suggestions { generation, items });
+        });
+    }
     fn start(&mut self, automatic: bool) {
         self.automatic = automatic;
         if !automatic {
@@ -251,6 +310,7 @@ impl Worker {
                     .map_err(|e| e.to_string())?;
             }
         }
+        self.maybe_request_suggestions();
         Ok(())
     }
     fn mpv(&self) -> Result<&Mpv, String> {
@@ -296,6 +356,7 @@ impl Worker {
             PlaybackCommand::Select(id) => {
                 self.queue.select(id)?;
                 self.start(false);
+                self.maybe_request_suggestions();
                 Ok(())
             }
             PlaybackCommand::PlayPause
@@ -339,6 +400,15 @@ impl Worker {
             }
             PlaybackCommand::Repeat => {
                 self.queue.repeat = self.queue.repeat.cycle();
+                self.maybe_request_suggestions();
+                Ok(())
+            }
+            PlaybackCommand::RefreshSuggestions => {
+                self.generation += 1;
+                self.suggesting = false;
+                self.exhausted_at_len = None;
+                self.queue.clear_upcoming_suggestions();
+                self.maybe_request_suggestions();
                 Ok(())
             }
             PlaybackCommand::SeekPercent(value) => self
@@ -385,6 +455,8 @@ impl Worker {
         }
         s.shuffle = self.queue.shuffle;
         s.repeat = self.queue.repeat.label().into();
+        s.suggesting = self.suggesting;
+        s.seed_title = self.queue.seed.as_ref().map(|seed| seed.title.clone());
         s.loading = self.phase == Phase::Loading;
         s.retry = self.phase == Phase::Failed;
         s.notice = self
@@ -394,6 +466,7 @@ impl Worker {
         let item = s.current_index.map(|i| &self.queue.entries[i].item);
         s.title = item.map_or("", |i| &i.title).into();
         s.artist = item.map_or("", |i| &i.artist).into();
+        s.artwork_url = item.and_then(|i| i.artwork_url.clone());
         let mpv = self.engine.as_ref().ok();
         s.playing = self.phase == Phase::Started
             && mpv.and_then(|m| m.get_property::<bool>("pause").ok()) == Some(false);
@@ -413,7 +486,11 @@ impl Worker {
         s.volume = self.volume / 100.;
     }
 }
-fn run_player(receiver: mpsc::Receiver<Request>, state: Arc<Mutex<PlaybackState>>) {
+fn run_player(
+    receiver: mpsc::Receiver<Request>,
+    sender: mpsc::Sender<Request>,
+    state: Arc<Mutex<PlaybackState>>,
+) {
     let engine = engine();
     if let Ok(mpv) = &engine {
         let _ = mpv.set_property("volume", 50.0);
@@ -425,19 +502,52 @@ fn run_player(receiver: mpsc::Receiver<Request>, state: Arc<Mutex<PlaybackState>
         automatic: false,
         notice: None,
         volume: 50.,
+        sender,
+        generation: 0,
+        suggesting: false,
+        exhausted_at_len: None,
     };
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(Request::Play(items, index, reply)) => {
+                worker.generation += 1;
+                worker.suggesting = false;
+                worker.exhausted_at_len = None;
                 worker.queue.replace(items, index);
                 worker.start(false);
+                worker.maybe_request_suggestions();
                 let _ = reply.send(Ok(()));
             }
             Ok(Request::Queue(command, reply)) => {
-                let _ = reply.send(worker.queue.edit(command));
+                let res = worker.queue.edit(command);
+                if res.is_ok() {
+                    worker.maybe_request_suggestions();
+                }
+                let _ = reply.send(res);
             }
             Ok(Request::Command(command, reply)) => {
                 let _ = reply.send(worker.command(command));
+            }
+            Ok(Request::Suggestions { generation, items }) => {
+                if generation == worker.generation {
+                    worker.suggesting = false;
+                    match items {
+                        Ok(items) => {
+                            let added = worker.queue.append_suggestions(items);
+                            if added == 0 {
+                                worker.exhausted_at_len = Some(worker.queue.entries.len());
+                            } else {
+                                worker.exhausted_at_len = None;
+                                if worker.phase == Phase::Ended {
+                                    let _ = worker.advance(true);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            worker.exhausted_at_len = Some(worker.queue.entries.len());
+                        }
+                    }
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -460,6 +570,7 @@ mod tests {
                 track_id: track.id.clone(),
                 title: track.name.clone(),
                 artist: track.artist_names().into(),
+                artwork_url: track.artwork_url(),
                 duration: track.duration_micros(),
             }],
             0,
@@ -481,6 +592,7 @@ mod tests {
             track_id: "abc".to_string().try_into().unwrap(),
             title: "Faixa B".into(),
             artist: String::new(),
+            artwork_url: None,
             duration: 0,
         };
         let mut worker = Worker {
@@ -490,6 +602,10 @@ mod tests {
             automatic: false,
             notice: None,
             volume: 0.,
+            sender: mpsc::channel().0,
+            generation: 0,
+            suggesting: false,
+            exhausted_at_len: None,
         };
         worker.queue.replace(vec![item.clone(), item], 0);
         load(worker.mpv().unwrap(), "/dev/null").unwrap();

@@ -1,3 +1,4 @@
+use crate::catalog::TrackId;
 use crate::playback::{PlaybackItem, QueueCommand};
 use rand::seq::IteratorRandom;
 
@@ -5,6 +6,7 @@ use rand::seq::IteratorRandom;
 pub(crate) struct Entry {
     pub id: u64,
     pub item: PlaybackItem,
+    pub suggested: bool,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -36,6 +38,8 @@ pub(crate) struct Queue {
     pub entries: Vec<Entry>,
     next_id: u64,
     pub selected: Option<u64>,
+    pub seed: Option<PlaybackItem>,
+    seen: Vec<TrackId>,
     history: Vec<u64>,
     failed: Vec<u64>,
     pub shuffle: bool,
@@ -43,20 +47,81 @@ pub(crate) struct Queue {
 }
 impl Queue {
     pub fn replace(&mut self, items: Vec<PlaybackItem>, index: usize) {
+        self.seed = items.get(index).cloned();
         self.entries.clear();
         self.history.clear();
         self.failed.clear();
+        self.seen.clear();
         for item in items {
-            self.push(item);
+            self.record_seen(&item.track_id);
+            self.push(item, false);
         }
         self.selected = Some(self.entries[index].id);
     }
-    fn push(&mut self, item: PlaybackItem) {
+    fn record_seen(&mut self, track_id: &TrackId) {
+        if !self.seen.contains(track_id) {
+            self.seen.push(track_id.clone());
+        }
+    }
+    fn push(&mut self, item: PlaybackItem, suggested: bool) {
         self.next_id += 1;
         self.entries.push(Entry {
             id: self.next_id,
             item,
+            suggested,
         });
+    }
+    pub fn upcoming_count(&self) -> usize {
+        let Some(index) = self.index() else {
+            return 0;
+        };
+        self.entries[index + 1..]
+            .iter()
+            .filter(|e| !self.failed.contains(&e.id))
+            .count()
+    }
+    pub fn seen_tracks(&self) -> Vec<TrackId> {
+        let mut seen = self.seen.clone();
+        for entry in &self.entries {
+            if !seen.contains(&entry.item.track_id) {
+                seen.push(entry.item.track_id.clone());
+            }
+        }
+        seen
+    }
+    pub fn append_suggestions(&mut self, items: Vec<PlaybackItem>) -> usize {
+        let mut added = 0;
+        for item in items {
+            if self.seen.contains(&item.track_id)
+                || self
+                    .entries
+                    .iter()
+                    .any(|e| e.item.track_id == item.track_id)
+            {
+                continue;
+            }
+            self.record_seen(&item.track_id);
+            self.push(item, true);
+            added += 1;
+        }
+        added
+    }
+    pub fn clear_upcoming_suggestions(&mut self) {
+        let start = self.index().map_or(0, |i| i + 1);
+        let mut idx = 0;
+        let mut removed = Vec::new();
+        self.entries.retain(|entry| {
+            let keep = idx < start || !entry.suggested;
+            if !keep {
+                removed.push(entry.id);
+            }
+            idx += 1;
+            keep
+        });
+        if !removed.is_empty() {
+            self.history.retain(|id| !removed.contains(id));
+            self.failed.retain(|id| !removed.contains(id));
+        }
     }
     pub fn index(&self) -> Option<usize> {
         self.entries
@@ -128,7 +193,27 @@ impl Queue {
     }
     pub fn edit(&mut self, command: QueueCommand) -> Result<(), String> {
         match command {
-            QueueCommand::Enqueue(item) => self.push(item),
+            QueueCommand::Enqueue(item) => {
+                self.record_seen(&item.track_id);
+                let insert_at = {
+                    let start = self.index().map_or(0, |i| i + 1);
+                    self.entries[start..]
+                        .iter()
+                        .position(|e| e.suggested)
+                        .map(|rel| start + rel)
+                };
+                self.next_id += 1;
+                let entry = Entry {
+                    id: self.next_id,
+                    item,
+                    suggested: false,
+                };
+                if let Some(pos) = insert_at {
+                    self.entries.insert(pos, entry);
+                } else {
+                    self.entries.push(entry);
+                }
+            }
             QueueCommand::Remove(id) => {
                 let i = self.position(id)?;
                 if self.selected == Some(id) {
@@ -160,6 +245,7 @@ mod tests {
             track_id: "abc".to_owned().try_into().unwrap(),
             title: "A".into(),
             artist: String::new(),
+            artwork_url: None,
             duration: 0,
         };
         let mut queue = Queue::default();
@@ -202,5 +288,66 @@ mod tests {
                 assert_eq!(attempts.len(), 4);
             }
         }
+    }
+
+    fn item(id: &str, title: &str) -> PlaybackItem {
+        PlaybackItem {
+            track_id: id.to_owned().try_into().unwrap(),
+            title: title.into(),
+            artist: "Artista".into(),
+            artwork_url: None,
+            duration: 180_000_000,
+        }
+    }
+
+    #[test]
+    fn suggestions_respect_seed_deduplication_and_manual_queue_priority() {
+        let mut q = Queue::default();
+        let seed = item("yt:aaaaaaaaaaa", "Primeira Música");
+        q.replace(vec![seed.clone()], 0);
+        assert_eq!(q.seed.as_ref(), Some(&seed));
+        assert_eq!(q.upcoming_count(), 0);
+
+        let added = q.append_suggestions(vec![
+            seed.clone(),
+            item("yt:bbbbbbbbbbb", "Sugestão 1"),
+            item("yt:bbbbbbbbbbb", "Sugestão 1 Duplicada"),
+            item("yt:ccccccccccc", "Sugestão 2"),
+        ]);
+        assert_eq!(added, 2);
+        assert_eq!(q.upcoming_count(), 2);
+        assert!(!q.entries[0].suggested);
+        assert!(q.entries[1].suggested);
+        assert!(q.entries[2].suggested);
+
+        // User manually enqueues a song: it goes before upcoming auto-suggestions
+        q.edit(QueueCommand::Enqueue(item("yt:ddddddddddd", "Manual 1")))
+            .unwrap();
+        q.edit(QueueCommand::Enqueue(item("yt:eeeeeeeeeee", "Manual 2")))
+            .unwrap();
+        let titles: Vec<&str> = q.entries.iter().map(|e| e.item.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Primeira Música",
+                "Manual 1",
+                "Manual 2",
+                "Sugestão 1",
+                "Sugestão 2",
+            ]
+        );
+        assert!(!q.entries[1].suggested);
+        assert!(!q.entries[2].suggested);
+        assert!(q.entries[3].suggested);
+
+        // Clearing upcoming suggestions preserves current track and manual tracks
+        q.clear_upcoming_suggestions();
+        let remaining: Vec<&str> = q.entries.iter().map(|e| e.item.title.as_str()).collect();
+        assert_eq!(remaining, vec!["Primeira Música", "Manual 1", "Manual 2"]);
+
+        // Seen tracks still remembers removed suggestions so they aren't repeated
+        let seen = q.seen_tracks();
+        assert!(seen.contains(&"yt:bbbbbbbbbbb".to_owned().try_into().unwrap()));
+        assert!(seen.contains(&"yt:ccccccccccc".to_owned().try_into().unwrap()));
     }
 }

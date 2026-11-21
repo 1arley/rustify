@@ -8,6 +8,7 @@ use gpui_component::{
 pub(crate) fn header(
     search: &Entity<InputState>,
     connected: bool,
+    on_home: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_search: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -18,18 +19,13 @@ pub(crate) fn header(
         .px_4()
         .bg(rgb(BLACK))
         .text_color(rgb(MUTED))
-        .child(div().flex().gap_4().text_lg().child("‹").child("›"))
         .child(div().flex_1())
         .child(
-            div()
-                .size(px(32.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(0x242424))
-                .text_color(rgb(0xffffff))
-                .child("⌂"),
+            Button::new("home")
+                .ghost()
+                .label("⌂")
+                .tooltip("Início")
+                .on_click(on_home),
         )
         .child(
             div()
@@ -54,7 +50,7 @@ pub(crate) fn header(
         )
         .child(div().flex_1())
         .child(div().text_sm().child(if connected {
-            "Catálogo Audius"
+            "YouTube · Audius"
         } else {
             "Player iniciando"
         }))

@@ -3,7 +3,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -123,9 +122,7 @@ fn authorize(client_id: &str) -> Result<TokenRecord, String> {
         .append_pair("code_challenge", &challenge)
         .append_pair("state", &state);
 
-    Command::new("xdg-open")
-        .arg(authorization_url.as_str())
-        .spawn()
+    open::that_detached(authorization_url.as_str())
         .map_err(|error| format!("Não foi possível abrir o navegador: {error}"))?;
 
     let code = authorization_code(listener, port, &state)?;

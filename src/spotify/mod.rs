@@ -31,6 +31,7 @@ pub(crate) fn connect(client_id: &str) -> Result<(), String> {
 }
 
 pub(crate) fn disconnect(client_id: &str) -> Result<(), String> {
+    crate::library::clear_spotify_snapshot()?;
     auth::clear_token(client_id.trim())
 }
 

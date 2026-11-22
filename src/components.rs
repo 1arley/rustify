@@ -151,74 +151,94 @@ pub(crate) fn icon_heart(liked: bool) -> Svg {
 pub(crate) fn header(
     search: &Entity<InputState>,
     connected: bool,
+    compact: bool,
     on_home: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_search: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let status_color = if connected { ACCENT } else { INFO };
-    div()
+    let search_box = div()
+        .flex_1()
+        .min_w_0()
+        .max_w(px(500.0))
+        .h(px(34.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .rounded_full()
+        .bg(rgb(CARD))
+        .border_1()
+        .border_color(rgb(CARD_HOVER))
+        .text_sm()
+        .child(svg_icon("icons/search.svg", PRIMARY, 16.0))
+        .child(Input::new(search).appearance(false).w_full())
+        .child(
+            Button::new("search-submit")
+                .ghost()
+                .compact()
+                .tooltip("Pesquisar")
+                .child(svg_icon("icons/search.svg", MUTED, 14.0))
+                .on_click(on_search),
+        );
+    let status = if compact {
+        Button::new("service-status")
+            .ghost()
+            .tooltip(if connected {
+                "Player pronto"
+            } else {
+                "Player iniciando"
+            })
+            .child(div().size(px(8.0)).rounded_full().bg(rgb(status_color)))
+            .into_any_element()
+    } else {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .bg(rgb(CARD))
+            .border_1()
+            .border_color(rgb(status_color))
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(status_color))
+            .child(div().size(px(8.0)).rounded_full().bg(rgb(status_color)))
+            .child(if connected {
+                "Player pronto"
+            } else {
+                "Player iniciando"
+            })
+            .into_any_element()
+    };
+
+    let mut header = div()
         .h(px(48.0))
         .flex()
         .items_center()
-        .gap_4()
+        .gap_3()
         .px_4()
         .bg(rgb(BLACK))
         .border_b_1()
         .border_color(rgb(CARD))
-        .text_color(rgb(MUTED))
-        .child(div().flex_1())
-        .child(
+        .text_color(rgb(MUTED));
+
+    if !compact {
+        header = header.child(div().flex_1());
+        header = header.child(
             Button::new("home")
                 .ghost()
                 .tooltip("Início")
                 .child(svg_icon("icons/home.svg", 0xffffff, 18.0))
                 .on_click(on_home),
-        )
-        .child(
-            div()
-                .w(px(500.0))
-                .h(px(34.0))
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .rounded_full()
-                .bg(rgb(CARD))
-                .border_1()
-                .border_color(rgb(CARD_HOVER))
-                .text_sm()
-                .child(svg_icon("icons/search.svg", PRIMARY, 16.0))
-                .child(Input::new(search).appearance(false).w_full())
-                .child(
-                    Button::new("search-submit")
-                        .ghost()
-                        .compact()
-                        .tooltip("Pesquisar")
-                        .child(svg_icon("icons/search.svg", MUTED, 14.0))
-                        .on_click(on_search),
-                ),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .rounded_full()
-                .bg(rgb(CARD))
-                .border_1()
-                .border_color(rgb(status_color))
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(status_color))
-                .child(div().size(px(8.0)).rounded_full().bg(rgb(status_color)))
-                .child(if connected {
-                    "YouTube · Audius"
-                } else {
-                    "Player iniciando"
-                }),
-        )
+        );
+    }
+    header = header.child(search_box);
+    if !compact {
+        header = header.child(div().flex_1());
+    }
+    header.child(status)
 }
 
 fn artwork_placeholder(mark: String, color: u32, side: f32) -> AnyElement {

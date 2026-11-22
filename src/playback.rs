@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::catalog::TrackId;
 use crate::queue::{Entry, Queue};
 use libmpv::Mpv;
 use libmpv::events::Event;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PlaybackState {
@@ -20,6 +21,7 @@ pub(crate) struct PlaybackState {
     pub shuffle: bool,
     pub repeat: String,
     pub queue: Vec<Entry>,
+    pub next_index: Option<usize>,
     pub loading: bool,
     pub retry: bool,
     pub notice: Option<String>,
@@ -42,6 +44,7 @@ impl Default for PlaybackState {
             shuffle: false,
             repeat: "None".to_owned(),
             queue: Vec::new(),
+            next_index: None,
             loading: false,
             retry: false,
             notice: None,
@@ -69,13 +72,19 @@ pub(crate) enum PlaybackCommand {
     RefreshSuggestions,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct PlaybackItem {
     pub track_id: TrackId,
     pub title: String,
     pub artist: String,
     pub artwork_url: Option<String>,
     pub duration: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct PlaybackSession {
+    pub item: PlaybackItem,
+    pub position: i64,
 }
 
 #[derive(Clone)]
@@ -210,6 +219,10 @@ struct Worker {
     generation: u64,
     suggesting: bool,
     exhausted_at_len: Option<usize>,
+    resume_position: i64,
+    pending_seek: Option<i64>,
+    last_persisted_session: Option<PlaybackSession>,
+    last_session_save: Instant,
 }
 impl Worker {
     fn maybe_request_suggestions(&mut self) {
@@ -265,7 +278,12 @@ impl Worker {
             };
             // Each selection owns its event queue, including when a URL is selected twice.
             if self.phase != Phase::Idle || self.engine.is_err() {
-                self.engine = engine();
+                let volume = self.volume;
+                self.engine = engine().and_then(|mpv| {
+                    mpv.set_property("volume", volume)
+                        .map(|_| mpv)
+                        .map_err(|error| error.to_string())
+                });
             }
             self.phase = Phase::Loading;
             self.publish();
@@ -315,7 +333,11 @@ impl Worker {
                 load(mpv, &stream_url)
             });
             match result {
-                Ok(()) => return,
+                Ok(()) => {
+                    self.pending_seek = (self.resume_position > 0).then_some(self.resume_position);
+                    self.resume_position = 0;
+                    return;
+                }
                 Err(e) => {
                     if !self.fail(e) {
                         return;
@@ -341,6 +363,8 @@ impl Worker {
     fn advance(&mut self, eof: bool) -> Result<(), String> {
         self.queue.completed();
         if let Some(next) = self.queue.next(eof) {
+            self.resume_position = 0;
+            self.pending_seek = None;
             self.queue.selected = Some(next);
             self.start(eof);
         } else {
@@ -359,17 +383,26 @@ impl Worker {
     }
     fn poll(&mut self) {
         loop {
-            let Ok(mpv) = self.mpv() else { return };
-            let Some(event) = mpv.wait_event(0.) else {
+            let Some(event) = self.mpv().ok().and_then(|mpv| mpv.wait_event(0.)) else {
                 return;
             };
             match event {
-                Ok(Event::PlaybackRestart)
-                    if self.phase == Phase::Loading
-                        && !mpv.get_property::<bool>("pause").unwrap_or(true) =>
-                {
-                    self.phase = Phase::Started;
-                    self.queue.started();
+                Ok(Event::PlaybackRestart) if self.phase == Phase::Loading => {
+                    let paused = self
+                        .mpv()
+                        .ok()
+                        .and_then(|mpv| mpv.get_property::<bool>("pause").ok())
+                        .unwrap_or(true);
+                    if !paused {
+                        self.phase = Phase::Started;
+                        self.queue.started();
+                        if let Some(position) = self.pending_seek.take() {
+                            let seconds = (position as f64 / 1_000_000.0).to_string();
+                            if let Ok(mpv) = self.mpv() {
+                                let _ = mpv.command("seek", &[&seconds, "absolute"]);
+                            }
+                        }
+                    }
                 }
                 Ok(Event::EndFile(libmpv::mpv_end_file_reason::Eof))
                     if self.phase == Phase::Started =>
@@ -395,6 +428,8 @@ impl Worker {
     fn command(&mut self, command: PlaybackCommand) -> Result<(), String> {
         match command {
             PlaybackCommand::Select(id) => {
+                self.resume_position = 0;
+                self.pending_seek = None;
                 self.queue.select(id)?;
                 self.start(false);
                 self.maybe_request_suggestions();
@@ -429,6 +464,8 @@ impl Worker {
                         .map_err(|e| e.to_string());
                 }
                 if let Some(id) = self.queue.previous() {
+                    self.resume_position = 0;
+                    self.pending_seek = None;
                     self.queue.select(id)?;
                     self.start(false);
                 }
@@ -494,6 +531,7 @@ impl Worker {
         if s.queue != self.queue.entries {
             s.queue.clone_from(&self.queue.entries);
         }
+        s.next_index = self.queue.preview_next_index();
         s.shuffle = self.queue.shuffle;
         s.repeat = self.queue.repeat.label().into();
         s.suggesting = self.suggesting;
@@ -515,7 +553,7 @@ impl Worker {
             mpv.and_then(|m| m.get_property::<f64>("time-pos").ok())
                 .map_or(0, |p| (p * 1e6) as i64)
         } else {
-            0
+            self.resume_position
         };
         s.duration = mpv
             .filter(|_| self.phase == Phase::Started)
@@ -525,6 +563,29 @@ impl Worker {
             .and_then(|m| m.get_property::<f64>("volume").ok())
             .unwrap_or(self.volume);
         s.volume = self.volume / 100.;
+        let session = self.queue.index().map(|index| PlaybackSession {
+            item: self.queue.entries[index].item.clone(),
+            position: s.position.max(0),
+        });
+        drop(s);
+        if let Some(session) = session {
+            let changed_track = self
+                .last_persisted_session
+                .as_ref()
+                .is_none_or(|saved| saved.item != session.item);
+            let moved = self
+                .last_persisted_session
+                .as_ref()
+                .is_none_or(|saved| (saved.position - session.position).abs() >= 5_000_000);
+            if changed_track
+                || (moved && self.last_session_save.elapsed() >= Duration::from_secs(5))
+            {
+                self.last_session_save = Instant::now();
+                if crate::library::save_playback_session(&session).is_ok() {
+                    self.last_persisted_session = Some(session);
+                }
+            }
+        }
     }
 }
 fn run_player(
@@ -536,8 +597,19 @@ fn run_player(
     if let Ok(mpv) = &engine {
         let _ = mpv.set_property("volume", 50.0);
     }
+    let restored = crate::library::load_playback_session()
+        .ok()
+        .flatten()
+        .filter(|session| session.position >= 0);
+    let mut queue = Queue::default();
+    let resume_position = if let Some(session) = &restored {
+        queue.replace(vec![session.item.clone()], 0);
+        session.position
+    } else {
+        0
+    };
     let mut worker = Worker {
-        queue: Queue::default(),
+        queue,
         engine,
         phase: Phase::Idle,
         automatic: false,
@@ -548,13 +620,20 @@ fn run_player(
         generation: 0,
         suggesting: false,
         exhausted_at_len: None,
+        resume_position,
+        pending_seek: None,
+        last_persisted_session: None,
+        last_session_save: Instant::now(),
     };
+    worker.publish();
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(Request::Play(items, index, reply)) => {
                 worker.generation += 1;
                 worker.suggesting = false;
                 worker.exhausted_at_len = None;
+                worker.resume_position = 0;
+                worker.pending_seek = None;
                 worker.queue.replace(items, index);
                 let _ = reply.send(Ok(()));
                 worker.start(false);
@@ -605,7 +684,7 @@ mod tests {
     #[test]
     #[ignore = "consulta o YouTube e reproduz áudio pelo libmpv"]
     fn youtube_search_and_play() {
-        let tracks = crate::catalog::Source::Youtube.search("M4rkim").unwrap();
+        let tracks = crate::catalog::search_all("M4rkim").unwrap();
         let track = &tracks[0];
         play_tracks(
             vec![PlaybackItem {
@@ -649,6 +728,10 @@ mod tests {
             generation: 0,
             suggesting: false,
             exhausted_at_len: None,
+            resume_position: 0,
+            pending_seek: None,
+            last_persisted_session: None,
+            last_session_save: Instant::now(),
         };
         worker.queue.replace(vec![item.clone(), item], 0);
         load(worker.mpv().unwrap(), "/dev/null").unwrap();

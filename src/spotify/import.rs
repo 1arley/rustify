@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -549,20 +548,18 @@ fn is_candidate_download_file(path: &Path, name_lower: &str) -> bool {
 }
 
 fn downloads_dir() -> Option<PathBuf> {
-    if let Ok(dir) = env::var("XDG_DOWNLOAD_DIR") {
-        let p = PathBuf::from(dir.trim());
-        if p.is_absolute() {
-            return Some(p);
-        }
-    }
-    env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads"))
+    dirs::download_dir().or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
 }
 
 fn expand_home(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = env::var_os("HOME")
+    if raw == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))
+        && let Some(home) = dirs::home_dir()
     {
-        return PathBuf::from(home).join(rest);
+        return home.join(rest);
     }
     PathBuf::from(raw)
 }
@@ -1368,6 +1365,16 @@ struct WebApiSavedTrackItem {
 mod tests {
     use super::*;
     use crate::catalog::TrackId;
+
+    #[test]
+    fn expands_home_paths_with_platform_separators() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/Music"), home.join("Music"));
+        assert_eq!(expand_home("~\\Music"), home.join("Music"));
+    }
 
     #[test]
     fn parses_spotify_urls_and_uris_including_localized_paths() {

@@ -178,6 +178,13 @@ impl Queue {
             .find(|e| !self.failed.contains(&e.id))
             .map(|e| e.id)
     }
+    pub fn preview_next_index(&self) -> Option<usize> {
+        if self.shuffle {
+            return None;
+        }
+        let id = self.next(false)?;
+        self.entries.iter().position(|entry| entry.id == id)
+    }
     pub fn completed(&mut self) {
         self.failed.clear();
     }
@@ -271,6 +278,21 @@ mod tests {
         q.edit(QueueCommand::Remove(ids[2])).unwrap();
         assert_eq!(q.previous(), Some(ids[0]));
     }
+
+    #[test]
+    fn next_preview_follows_order_and_repeat_without_guessing_shuffle() {
+        let mut queue = Queue::default();
+        queue.replace(vec![item("a", "A"), item("b", "B")], 0);
+        assert_eq!(queue.preview_next_index(), Some(1));
+
+        queue.selected = Some(queue.entries[1].id);
+        assert_eq!(queue.preview_next_index(), None);
+        queue.repeat = Repeat::Playlist;
+        assert_eq!(queue.preview_next_index(), Some(0));
+        queue.shuffle = true;
+        assert_eq!(queue.preview_next_index(), None);
+    }
+
     #[test]
     fn failure_chain_visits_each_candidate_at_most_once() {
         for shuffle in [false, true] {

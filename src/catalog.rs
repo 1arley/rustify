@@ -218,20 +218,13 @@ fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
                 video.uploader.as_deref(),
                 &video.title,
             );
-            tracks.push(Track {
-                id: TrackId::Youtube(video.id),
-                name: video.title,
-                user: User { name: artist },
-                genre: "YouTube".into(),
-                mood: None,
-                tags: None,
-                bpm: None,
-                duration: video.duration.unwrap_or_default(),
-                permalink: String::new(),
-                artwork: None,
-                streamable: true,
-                stream_gated: false,
-            });
+            tracks.push(Track::from_youtube(
+                video.id,
+                video.title,
+                artist,
+                video.duration.unwrap_or_default(),
+                None,
+            ));
         }
     }
     Ok(tracks)
@@ -239,6 +232,39 @@ fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
 
 fn youtube_tracks(query: &str) -> Result<Vec<Track>, String> {
     run_yt_dlp(&format!("ytsearch12:{query}"), 12)
+}
+
+pub(crate) fn search_all(query: &str) -> Result<Vec<Track>, String> {
+    let (youtube, audius) = std::thread::scope(|scope| {
+        let youtube = scope.spawn(|| youtube_tracks(query));
+        let audius = scope.spawn(|| search_tracks(query));
+        (youtube.join(), audius.join())
+    });
+    let youtube = youtube.unwrap_or_else(|_| Err("A busca do YouTube falhou.".to_owned()));
+    let audius = audius.unwrap_or_else(|_| Err("A busca do Audius falhou.".to_owned()));
+    match (youtube, audius) {
+        (Ok(youtube), Ok(audius)) => Ok(merge_search_results(youtube, audius)),
+        (Ok(tracks), Err(_)) | (Err(_), Ok(tracks)) => Ok(tracks),
+        (Err(youtube), Err(audius)) => Err(format!("{youtube} {audius}")),
+    }
+}
+
+fn merge_search_results(mut tracks: Vec<Track>, incoming: Vec<Track>) -> Vec<Track> {
+    for track in incoming {
+        let title = canonical_song_title(&track.name, track.artist_names());
+        let artist = normalize_artist(track.artist_names(), &track.name);
+        let duplicate = tracks.iter().any(|current| {
+            current.same_identity(&track)
+                || (!title.is_empty()
+                    && !artist.is_empty()
+                    && canonical_song_title(&current.name, current.artist_names()) == title
+                    && normalize_artist(current.artist_names(), &current.name) == artist)
+        });
+        if !duplicate {
+            tracks.push(track);
+        }
+    }
+    tracks
 }
 
 pub(crate) fn youtube_id(id: &str) -> bool {
@@ -340,8 +366,39 @@ struct Artwork {
 }
 
 impl Track {
-    /// Constrói uma faixa de catálogo preservando os metadados vindos do Spotify e
-    /// reutilizando o vínculo do YouTube se já tiver sido resolvido anteriormente.
+    pub(crate) fn from_youtube(
+        id: String,
+        title: String,
+        artist: String,
+        duration_secs: f64,
+        artwork_url: Option<String>,
+    ) -> Self {
+        debug_assert!(youtube_id(&id));
+        let permalink = format!("https://www.youtube.com/watch?v={id}");
+        let artwork = artwork_url
+            .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+            .map(|url| Artwork {
+                small: None,
+                medium: Some(url),
+                large: None,
+            });
+        Self {
+            id: TrackId::Youtube(id),
+            name: title,
+            user: User { name: artist },
+            genre: "YouTube".into(),
+            mood: None,
+            tags: None,
+            bpm: None,
+            duration: duration_secs.max(0.0),
+            permalink,
+            artwork,
+            streamable: true,
+            stream_gated: false,
+        }
+    }
+
+    /// Constrói uma faixa preservando a identidade original do Spotify.
     pub(crate) fn from_spotify(
         spotify_id: Option<&str>,
         title: String,
@@ -357,10 +414,7 @@ impl Track {
             .clone()
             .unwrap_or_else(|| local_spotify_key(&title, &artist));
 
-        let id = match crate::library::lookup_resolved_youtube_id(&sp_key) {
-            Some(yt_id) if youtube_id(&yt_id) => TrackId::Youtube(yt_id),
-            _ => TrackId::Spotify(sp_key),
-        };
+        let id = TrackId::Spotify(sp_key);
         let permalink = extracted_id
             .map(|id| format!("https://open.spotify.com/track/{id}"))
             .unwrap_or_default();
@@ -1251,20 +1305,6 @@ pub(crate) fn recommend_tracks(
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Source {
-    Youtube,
-    Audius,
-}
-impl Source {
-    pub fn search(self, query: &str) -> Result<Vec<Track>, String> {
-        match self {
-            Self::Youtube => youtube_tracks(query),
-            Self::Audius => search_tracks(query),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) enum TrackId {
@@ -1391,6 +1431,35 @@ mod tests {
             streamable: true,
             stream_gated: false,
         }
+    }
+
+    #[test]
+    fn combined_search_merges_duplicate_titles_across_catalogs() {
+        let youtube = yt_track(
+            "abcdefghijk",
+            "Numb (Official Audio)",
+            "Linkin Park - Topic",
+            210.0,
+        );
+        let same_song = Track::from_spotify(
+            None,
+            "Numb".into(),
+            "Linkin Park".into(),
+            String::new(),
+            210_000,
+            None,
+        );
+        let unique_song = Track::from_spotify(
+            None,
+            "In the End".into(),
+            "Linkin Park".into(),
+            String::new(),
+            216_000,
+            None,
+        );
+
+        let merged = merge_search_results(vec![youtube], vec![same_song, unique_song]);
+        assert_eq!(merged.len(), 2);
     }
 
     #[test]

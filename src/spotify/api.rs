@@ -5,16 +5,6 @@ use super::{api_message, http_agent, status_error};
 
 const PAGE_SIZE: &str = "50";
 
-pub(super) fn search_tracks(access_token: &str, query: &str) -> Result<Vec<Track>, ApiFailure> {
-    let response: SearchResponse = get_json(access_token, search_url(query))?;
-    Ok(response
-        .tracks
-        .items
-        .into_iter()
-        .filter(|track| super::is_valid_track_uri(&track.uri))
-        .collect())
-}
-
 pub(super) fn saved_tracks(access_token: &str, offset: u32) -> Result<ApiPage<Track>, ApiFailure> {
     let mut url = Url::parse("https://api.spotify.com/v1/me/tracks").expect("static API URL");
     add_page_parameters(&mut url, offset);
@@ -48,6 +38,17 @@ pub(super) fn playlists(access_token: &str, offset: u32) -> Result<ApiPage<Playl
     ))
 }
 
+pub(super) fn playlist_meta(access_token: &str, playlist_id: &str) -> Result<Playlist, ApiFailure> {
+    if !super::is_valid_id(playlist_id) {
+        return Err(ApiFailure::invalid_response());
+    }
+    let url = Url::parse(&format!(
+        "https://api.spotify.com/v1/playlists/{playlist_id}"
+    ))
+    .expect("validated playlist ID and static API URL");
+    get_json(access_token, url)
+}
+
 pub(super) fn playlist_tracks(
     access_token: &str,
     playlist_id: &str,
@@ -58,7 +59,7 @@ pub(super) fn playlist_tracks(
     }
 
     let mut url = Url::parse(&format!(
-        "https://api.spotify.com/v1/playlists/{playlist_id}/items"
+        "https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
     ))
     .expect("validated playlist ID and static API URL");
     add_page_parameters(&mut url, offset);
@@ -119,15 +120,6 @@ fn add_page_parameters(url: &mut Url, offset: u32) {
         .append_pair("offset", &offset.to_string());
 }
 
-fn search_url(query: &str) -> Url {
-    let mut url = Url::parse("https://api.spotify.com/v1/search").expect("static API URL");
-    url.query_pairs_mut()
-        .append_pair("q", query)
-        .append_pair("type", "track")
-        .append_pair("limit", "10");
-    url
-}
-
 #[derive(Clone)]
 pub(crate) struct ApiPage<T> {
     pub items: Vec<T>,
@@ -160,16 +152,25 @@ impl ApiFailure {
     }
 }
 
-#[derive(Deserialize)]
-struct SearchResponse {
+#[derive(Clone, Deserialize, Default)]
+pub(crate) struct SpotifyImage {
     #[serde(default)]
-    tracks: SearchPage,
+    pub url: String,
+    #[serde(default)]
+    pub width: Option<u32>,
 }
 
-#[derive(Deserialize, Default)]
-struct SearchPage {
-    #[serde(default)]
-    items: Vec<Track>,
+fn pick_best_image(images: &[SpotifyImage]) -> Option<String> {
+    let valid = |img: &&SpotifyImage| {
+        let url = img.url.trim();
+        url.starts_with("http://") || url.starts_with("https://")
+    };
+    images
+        .iter()
+        .filter(valid)
+        .find(|img| img.width.is_some_and(|w| (200..=640).contains(&w)))
+        .or_else(|| images.iter().find(valid))
+        .map(|img| img.url.trim().to_owned())
 }
 
 #[derive(Clone, Deserialize)]
@@ -181,19 +182,40 @@ pub(crate) struct Track {
     #[serde(default)]
     artists: Vec<Artist>,
     album: Option<Album>,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 impl Track {
     pub(crate) fn artist_names(&self) -> String {
         self.artists
             .iter()
-            .map(|artist| artist.name.as_str())
+            .map(|artist| artist.name.trim())
+            .filter(|name| !name.is_empty())
             .collect::<Vec<_>>()
             .join(", ")
     }
 
     pub(crate) fn album_name(&self) -> &str {
         self.album.as_ref().map_or("", |album| album.name.as_str())
+    }
+
+    pub(crate) fn artwork_url(&self) -> Option<String> {
+        self.album.as_ref().and_then(Album::artwork_url)
+    }
+
+    pub(crate) fn into_catalog_track(self) -> crate::catalog::Track {
+        let artist = self.artist_names();
+        let album = self.album_name().to_owned();
+        let artwork = self.artwork_url();
+        crate::catalog::Track::from_spotify(
+            Some(&self.uri),
+            self.name,
+            artist,
+            album,
+            self.duration_ms,
+            artwork,
+        )
     }
 }
 
@@ -202,19 +224,15 @@ pub(crate) struct Playlist {
     pub id: String,
     pub name: String,
     #[serde(default)]
-    items: PlaylistItemCount,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub images: Vec<SpotifyImage>,
 }
 
 impl Playlist {
-    pub(crate) fn track_count(&self) -> u32 {
-        self.items.total
+    pub(crate) fn artwork_url(&self) -> Option<String> {
+        pick_best_image(&self.images)
     }
-}
-
-#[derive(Clone, Deserialize, Default)]
-struct PlaylistItemCount {
-    #[serde(default)]
-    total: u32,
 }
 
 #[derive(Deserialize)]
@@ -262,4 +280,12 @@ struct Artist {
 struct Album {
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    images: Vec<SpotifyImage>,
+}
+
+impl Album {
+    fn artwork_url(&self) -> Option<String> {
+        pick_best_image(&self.images)
+    }
 }

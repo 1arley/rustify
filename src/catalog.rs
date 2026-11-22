@@ -252,6 +252,56 @@ fn is_valid_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
+pub(crate) fn is_spotify_base62_id(id: &str) -> bool {
+    id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn spotify_track_key(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn extract_spotify_track_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if let Some(id) = trimmed.strip_prefix("spotify:track:") {
+        return is_spotify_base62_id(id).then(|| id.to_owned());
+    }
+    if is_spotify_base62_id(trimmed) {
+        return Some(trimmed.to_owned());
+    }
+    let url = Url::parse(trimmed).ok()?;
+    let mut segments = url.path_segments()?;
+    while let Some(seg) = segments.next() {
+        if seg == "track"
+            && let Some(id) = segments.next()
+            && is_spotify_base62_id(id)
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+fn local_spotify_key(title: &str, artist: &str) -> String {
+    let mut norm_artist = normalize_artist(artist, title);
+    let mut norm_title = canonical_song_title(title, artist);
+    if norm_artist.is_empty() {
+        norm_artist = collapse_spaces(&artist.to_lowercase());
+    }
+    if norm_title.is_empty() {
+        norm_title = collapse_spaces(&title.to_lowercase());
+    }
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    for byte in norm_artist.bytes().chain([0_u8]).chain(norm_title.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    format!("local_{hash:016x}")
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Track {
     pub id: TrackId,
@@ -290,6 +340,60 @@ struct Artwork {
 }
 
 impl Track {
+    /// Constrói uma faixa de catálogo preservando os metadados vindos do Spotify e
+    /// reutilizando o vínculo do YouTube se já tiver sido resolvido anteriormente.
+    pub(crate) fn from_spotify(
+        spotify_id: Option<&str>,
+        title: String,
+        artist: String,
+        album: String,
+        duration_ms: u64,
+        artwork_url: Option<String>,
+    ) -> Self {
+        let title = title.trim().to_owned();
+        let artist = artist.trim().to_owned();
+        let extracted_id = spotify_id.and_then(extract_spotify_track_id);
+        let sp_key = extracted_id
+            .clone()
+            .unwrap_or_else(|| local_spotify_key(&title, &artist));
+
+        let id = match crate::library::lookup_resolved_youtube_id(&sp_key) {
+            Some(yt_id) if youtube_id(&yt_id) => TrackId::Youtube(yt_id),
+            _ => TrackId::Spotify(sp_key),
+        };
+        let permalink = extracted_id
+            .map(|id| format!("https://open.spotify.com/track/{id}"))
+            .unwrap_or_default();
+        let artwork = artwork_url
+            .map(|url| url.trim().to_owned())
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+            .map(|url| Artwork {
+                small: None,
+                medium: Some(url),
+                large: None,
+            });
+        let genre = if album.trim().is_empty() {
+            "Spotify".to_owned()
+        } else {
+            album.trim().to_owned()
+        };
+
+        Self {
+            id,
+            name: title,
+            user: User { name: artist },
+            genre,
+            mood: None,
+            tags: None,
+            bpm: None,
+            duration: (duration_ms as f64) / 1000.0,
+            permalink,
+            artwork,
+            streamable: true,
+            stream_gated: false,
+        }
+    }
+
     pub(crate) fn artist_names(&self) -> &str {
         &self.user.name
     }
@@ -306,7 +410,23 @@ impl Track {
         self.id.stream_url()
     }
 
-    /// Retorna a URL da capa da faixa (Audius ou miniatura padrão do YouTube).
+    /// Retorna `true` se duas faixas representam a mesma música por ID, permalink ou vínculo resolvido.
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        if self.id == other.id || (!self.permalink.is_empty() && self.permalink == other.permalink)
+        {
+            return true;
+        }
+        match (&self.id, &other.id) {
+            (TrackId::Spotify(sp_key), TrackId::Youtube(yt_id))
+            | (TrackId::Youtube(yt_id), TrackId::Spotify(sp_key)) => {
+                crate::library::lookup_resolved_youtube_id(sp_key).as_deref()
+                    == Some(yt_id.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    /// Retorna a URL da capa da faixa (Audius, Spotify ou miniatura padrão do YouTube).
     pub(crate) fn artwork_url(&self) -> Option<String> {
         if let Some(artwork) = &self.artwork {
             for candidate in [&artwork.medium, &artwork.small, &artwork.large] {
@@ -321,11 +441,14 @@ impl Track {
         }
         match &self.id {
             TrackId::Youtube(id) => Some(format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg")),
-            TrackId::Audius(_) => None,
+            TrackId::Audius(_) | TrackId::Spotify(_) => None,
         }
     }
 
     pub(crate) fn permalink(&self) -> String {
+        if self.permalink.starts_with("https://") || self.permalink.starts_with("http://") {
+            return self.permalink.clone();
+        }
         let TrackId::Audius(id) = &self.id else {
             return self.stream_url();
         };
@@ -914,6 +1037,153 @@ fn recommend_audius_tracks(
     ))
 }
 
+fn select_best_youtube_match(
+    candidates: Vec<Track>,
+    title: &str,
+    artist: &str,
+    duration_micros: i64,
+) -> Option<String> {
+    let target_secs = (duration_micros.max(0) as f64) / 1_000_000.0;
+    let seed_title_lower = title.to_lowercase();
+    let seed_title_canon = canonical_song_title(title, artist);
+    let seed_artist_norm = normalize_artist(artist, title);
+    let primary_artist = seed_artist_norm
+        .split(',')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default();
+
+    let yt_candidates: Vec<(usize, Track)> = candidates
+        .into_iter()
+        .enumerate()
+        .filter(|(_, track)| matches!(&track.id, TrackId::Youtube(id) if youtube_id(id)))
+        .collect();
+    if yt_candidates.is_empty() {
+        return None;
+    }
+
+    let valid_music: Vec<(usize, Track)> = yt_candidates
+        .iter()
+        .filter(|(_, track)| is_valid_music_candidate(track, target_secs, &seed_title_lower))
+        .cloned()
+        .collect();
+    let pool = if valid_music.is_empty() {
+        yt_candidates
+    } else {
+        valid_music
+    };
+
+    let mut best: Option<(i32, usize, String)> = None;
+    for (idx, cand) in pool {
+        let TrackId::Youtube(video_id) = cand.id.clone() else {
+            continue;
+        };
+        let mut score = 0i32;
+
+        let cand_title_canon = canonical_song_title(&cand.name, cand.artist_names());
+        let cand_title_with_seed = canonical_song_title(&cand.name, artist);
+        if !seed_title_canon.is_empty() {
+            if cand_title_canon == seed_title_canon || cand_title_with_seed == seed_title_canon {
+                score += 50;
+            } else if !cand_title_canon.is_empty()
+                && (cand_title_canon.contains(&seed_title_canon)
+                    || seed_title_canon.contains(&cand_title_canon))
+            {
+                score += 25;
+            }
+        }
+
+        let cand_artist_norm = normalize_artist(cand.artist_names(), &cand.name);
+        let cand_name_lower = cand.name.to_lowercase();
+        if !seed_artist_norm.is_empty() {
+            if cand_artist_norm == seed_artist_norm
+                || (!cand_artist_norm.is_empty()
+                    && (cand_artist_norm.contains(&seed_artist_norm)
+                        || seed_artist_norm.contains(&cand_artist_norm)))
+                || cand_name_lower.contains(&seed_artist_norm)
+            {
+                score += 30;
+            } else if !primary_artist.is_empty()
+                && (cand_artist_norm.contains(primary_artist)
+                    || cand_name_lower.contains(primary_artist))
+            {
+                score += 25;
+            }
+        }
+
+        if target_secs > 0.0 && cand.duration > 0.0 {
+            let diff = (target_secs - cand.duration).abs();
+            if diff <= 5.0 {
+                score += 40;
+            } else if diff <= 15.0 {
+                score += 25;
+            } else if diff <= 35.0 {
+                score += 10;
+            } else if diff > 120.0 {
+                score -= 50;
+            }
+        }
+
+        for term in [
+            "live",
+            "ao vivo",
+            "cover",
+            "karaoke",
+            "instrumental",
+            "remix",
+            "sped up",
+            "slowed",
+        ] {
+            if cand_name_lower.contains(term) && !seed_title_lower.contains(term) {
+                score -= 25;
+            }
+        }
+
+        let ch_lower = cand.artist_names().to_lowercase();
+        if ch_lower.ends_with("- topic")
+            || ch_lower.contains("official")
+            || ch_lower.contains("vevo")
+        {
+            score += 10;
+        }
+
+        let replace = match &best {
+            None => true,
+            Some((best_score, best_idx, _)) => {
+                score > *best_score || (score == *best_score && idx < *best_idx)
+            }
+        };
+        if replace {
+            best = Some((score, idx, video_id));
+        }
+    }
+
+    best.map(|(_, _, id)| id)
+}
+
+/// Busca no YouTube o vídeo mais fiel aos metadados importados do Spotify.
+pub(crate) fn resolve_spotify_to_youtube(
+    title: &str,
+    artist: &str,
+    duration_micros: i64,
+) -> Result<String, String> {
+    let title_t = title.trim();
+    let artist_t = artist.trim();
+    let query = if artist_t.is_empty() {
+        title_t.to_owned()
+    } else if title_t.is_empty() {
+        artist_t.to_owned()
+    } else {
+        format!("{artist_t} - {title_t}")
+    };
+    if query.is_empty() {
+        return Err("Faixa sem título ou artista para buscar áudio.".to_owned());
+    }
+    let candidates = run_yt_dlp(&format!("ytsearch5:{query}"), 5)?;
+    select_best_youtube_match(candidates, title_t, artist_t, duration_micros)
+        .ok_or_else(|| "Não foi possível encontrar áudio correspondente no YouTube.".to_owned())
+}
+
 pub(crate) fn recommend_tracks(
     seed_id: &TrackId,
     seed_title: &str,
@@ -938,6 +1208,46 @@ pub(crate) fn recommend_tracks(
             seed_duration_micros,
             exclude,
         ),
+        TrackId::Spotify(sp_key) => {
+            if let Some(yt_id) = crate::library::lookup_resolved_youtube_id(sp_key) {
+                return recommend_youtube_tracks(
+                    &yt_id,
+                    seed_id,
+                    seed_title,
+                    seed_artist,
+                    seed_duration_micros,
+                    exclude,
+                );
+            }
+            if let Ok(yt_id) =
+                resolve_spotify_to_youtube(seed_title, seed_artist, seed_duration_micros)
+            {
+                crate::library::record_resolved_youtube_id(sp_key, &yt_id);
+                return recommend_youtube_tracks(
+                    &yt_id,
+                    seed_id,
+                    seed_title,
+                    seed_artist,
+                    seed_duration_micros,
+                    exclude,
+                );
+            }
+            let fallback_query = if seed_artist.trim().is_empty() {
+                format!("{seed_title} mix")
+            } else {
+                format!("{seed_artist} {seed_title} mix")
+            };
+            let candidates = youtube_tracks(fallback_query.trim())?;
+            Ok(curate_recommendations(
+                seed_id,
+                seed_title,
+                seed_artist,
+                seed_duration_micros,
+                candidates,
+                exclude,
+                DEFAULT_RECOMMENDATION_LIMIT,
+            ))
+        }
     }
 }
 
@@ -960,14 +1270,17 @@ impl Source {
 pub(crate) enum TrackId {
     Audius(String),
     Youtube(String),
+    Spotify(String),
 }
 impl TryFrom<String> for TrackId {
     type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if is_valid_id(&value) {
-            Ok(Self::Audius(value))
-        } else if let Some(id) = value.strip_prefix("yt:").filter(|id| youtube_id(id)) {
+        if let Some(id) = value.strip_prefix("yt:").filter(|id| youtube_id(id)) {
             Ok(Self::Youtube(id.into()))
+        } else if let Some(id) = value.strip_prefix("sp:").filter(|id| spotify_track_key(id)) {
+            Ok(Self::Spotify(id.into()))
+        } else if is_valid_id(&value) {
+            Ok(Self::Audius(value))
         } else {
             Err("Identificador de faixa inválido")
         }
@@ -978,6 +1291,7 @@ impl From<TrackId> for String {
         match id {
             TrackId::Youtube(id) => format!("yt:{id}"),
             TrackId::Audius(id) => id,
+            TrackId::Spotify(id) => format!("sp:{id}"),
         }
     }
 }
@@ -986,6 +1300,13 @@ impl TrackId {
         match self {
             Self::Youtube(id) => format!("https://www.youtube.com/watch?v={id}"),
             Self::Audius(id) => format!("{API_BASE}/tracks/{id}/stream?app_name={APP_NAME}"),
+            Self::Spotify(id) => {
+                if is_spotify_base62_id(id) {
+                    format!("https://open.spotify.com/track/{id}")
+                } else {
+                    String::new()
+                }
+            }
         }
     }
 }
@@ -1283,5 +1604,68 @@ mod tests {
         // 3 tags (90) + genre (25) + mood (20) + bpm (12) + duration (8) = 155
         assert_eq!(strong_score, 155);
         assert_eq!(weak_score, 0);
+    }
+
+    #[test]
+    fn spotify_track_id_roundtrips_and_preserves_metadata() {
+        let parsed: TrackId = "sp:4HCOHRCSQelz2GPX8iTamO".to_owned().try_into().unwrap();
+        assert_eq!(
+            parsed,
+            TrackId::Spotify("4HCOHRCSQelz2GPX8iTamO".to_owned())
+        );
+        assert_eq!(String::from(parsed.clone()), "sp:4HCOHRCSQelz2GPX8iTamO");
+        assert_eq!(
+            parsed.stream_url(),
+            "https://open.spotify.com/track/4HCOHRCSQelz2GPX8iTamO"
+        );
+        assert!(serde_json::from_str::<TrackId>(r#""sp:../bad""#).is_err());
+
+        let track = Track::from_spotify(
+            Some("spotify:track:2iblMMIgSznA464mNov7A8"),
+            "Don't Stop the Party".to_owned(),
+            "Pitbull, TJR".to_owned(),
+            "Global Warming".to_owned(),
+            206_120,
+            Some("https://image-cdn-ak.spotifycdn.com/image/cover.jpg".to_owned()),
+        );
+        assert_eq!(
+            track.permalink(),
+            "https://open.spotify.com/track/2iblMMIgSznA464mNov7A8"
+        );
+        assert_eq!(
+            track.artwork_url().as_deref(),
+            Some("https://image-cdn-ak.spotifycdn.com/image/cover.jpg")
+        );
+        assert_eq!(track.album_name(), "Global Warming");
+        assert_eq!(track.duration_micros(), 206_120_000);
+
+        let local_track = Track::from_spotify(
+            None,
+            "Custom Song".to_owned(),
+            "Custom Artist".to_owned(),
+            String::new(),
+            120_000,
+            None,
+        );
+        assert!(matches!(local_track.id, TrackId::Spotify(ref k) if k.starts_with("local_")));
+        assert_eq!(local_track.permalink(), "");
+        assert_eq!(local_track.album_name(), "Spotify");
+    }
+
+    #[test]
+    fn select_best_youtube_match_prefers_studio_duration_and_artist_match() {
+        let candidates = vec![
+            yt_track(
+                "live0000001",
+                "Linkin Park - Numb (Live in Texas)",
+                "Random Channel",
+                260.0,
+            ),
+            yt_track("best0000001", "Numb", "Linkin Park - Topic", 187.0),
+            yt_track("cover000001", "Numb (Piano Cover)", "Piano Covers", 190.0),
+        ];
+
+        let chosen = select_best_youtube_match(candidates, "Numb", "Linkin Park", 188_000_000);
+        assert_eq!(chosen.as_deref(), Some("best0000001"));
     }
 }

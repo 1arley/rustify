@@ -1,5 +1,8 @@
-use std::io::{BufRead, Read, Write};
+use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,12 +13,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use super::config::config_dir;
 use super::{http_agent, status_error};
 
-const KEYRING_SERVICE: &str = "rea-spotify";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const REDIRECT_BASE: &str = "http://127.0.0.1";
-const REQUIRED_SCOPES: &str = "user-read-private user-library-read playlist-read-private";
+const REQUIRED_SCOPES: &str =
+    "user-read-private user-library-read playlist-read-private playlist-read-collaborative";
+
+pub(super) fn has_token(client_id: &str) -> bool {
+    let Ok(Some(token)) = load_token(client_id) else {
+        return false;
+    };
+    has_required_scopes(&token.scope)
+        && (!token.refresh_token.is_empty() || token.expires_at > unix_time().saturating_add(30))
+}
 
 pub(super) fn connect(client_id: &str) -> Result<(), String> {
     if let Some(token) = load_token(client_id)? {
@@ -35,7 +47,8 @@ pub(super) fn connect(client_id: &str) -> Result<(), String> {
 
 pub(super) fn access_token(client_id: &str) -> Result<String, String> {
     let token = load_token(client_id)?.ok_or_else(|| {
-        "Conecte sua conta Spotify antes de pesquisar. Use o botão Conectar Spotify.".to_owned()
+        "Conecte sua conta Spotify antes de sincronizar. Use o botão Conectar e sincronizar conta."
+            .to_owned()
     })?;
     if !has_required_scopes(&token.scope) {
         return Err("Reconecte sua conta para liberar biblioteca e playlists.".to_owned());
@@ -63,11 +76,19 @@ pub(super) fn refresh_access_token(client_id: &str) -> Result<String, String> {
 }
 
 pub(super) fn clear_token(client_id: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, client_id)
-        .map_err(|_| "Não foi possível acessar o chaveiro seguro do sistema.".to_owned())?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(_) => Err("Não foi possível remover a sessão do chaveiro do sistema.".to_owned()),
+    let path = token_path()?;
+    let mut store = load_token_store(&path)?;
+    if store.remove(client_id).is_none() {
+        return Ok(());
+    }
+    if store.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Não foi possível remover a sessão salva: {error}")),
+        }
+    } else {
+        write_token_store(&path, &store)
     }
 }
 
@@ -143,7 +164,7 @@ fn authorization_code(
                     respond(&mut stream, "Retorno OAuth inválido", 400);
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(100));
             }
             Err(error) => return Err(format!("Falha no retorno OAuth: {error}")),
@@ -265,26 +286,73 @@ fn has_required_scopes(scope: &str) -> bool {
         .all(|required| granted.contains(&required))
 }
 
-fn load_token(client_id: &str) -> Result<Option<TokenRecord>, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, client_id)
-        .map_err(|_| "Não foi possível acessar o chaveiro seguro do sistema.".to_owned())?;
-    match entry.get_password() {
-        Ok(value) => serde_json::from_str(&value)
-            .map(Some)
-            .map_err(|_| "A sessão salva está inválida. Conecte a conta novamente.".to_owned()),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Err("Não foi possível acessar o chaveiro seguro do sistema.".to_owned()),
+fn token_path() -> Result<PathBuf, String> {
+    config_dir()
+        .map(|dir| dir.join("token.json"))
+        .ok_or_else(|| "Não foi possível localizar a pasta de configuração.".to_owned())
+}
+
+fn load_token_store(path: &PathBuf) -> Result<HashMap<String, TokenRecord>, String> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(format!("Não foi possível ler a sessão salva: {error}")),
+    };
+    serde_json::from_slice(&contents)
+        .map_err(|_| "A sessão salva está inválida. Conecte a conta novamente.".to_owned())
+}
+
+fn write_token_store(path: &PathBuf, store: &HashMap<String, TokenRecord>) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Não foi possível localizar a pasta de configuração.".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Não foi possível criar a configuração: {error}"))?;
+
+    let payload = serde_json::to_vec_pretty(store)
+        .map_err(|_| "Não foi possível preparar a sessão Spotify.".to_owned())?;
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+
+    let write_result = options
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(&payload))
+        .and_then(|()| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+            }
+            fs::rename(&temporary, path)
+        });
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Não foi possível guardar a sessão Spotify: {error}"
+        ));
+    }
+    Ok(())
+}
+
+fn load_token(client_id: &str) -> Result<Option<TokenRecord>, String> {
+    let path = token_path()?;
+    let store = load_token_store(&path)?;
+    Ok(store.get(client_id).cloned())
 }
 
 fn save_token(client_id: &str, token: &TokenRecord) -> Result<(), String> {
-    let value = serde_json::to_string(token)
-        .map_err(|_| "Não foi possível preparar a sessão Spotify.".to_owned())?;
-    let entry = keyring::Entry::new(KEYRING_SERVICE, client_id)
-        .map_err(|_| "Não foi possível acessar o chaveiro seguro do sistema.".to_owned())?;
-    entry
-        .set_password(&value)
-        .map_err(|_| "Não foi possível guardar a sessão no chaveiro seguro do sistema.".to_owned())
+    let path = token_path()?;
+    let mut store = load_token_store(&path).unwrap_or_default();
+    store.insert(client_id.to_owned(), token.clone());
+    write_token_store(&path, &store)
 }
 
 fn unix_time() -> u64 {
@@ -293,7 +361,7 @@ fn unix_time() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TokenRecord {
     access_token: String,
     refresh_token: String,

@@ -1,13 +1,17 @@
 mod api;
 mod auth;
 mod config;
+mod import;
 
 use std::time::Duration;
 
 use serde::Deserialize;
 
-pub(crate) use api::Track;
-pub(crate) use api::{ApiPage, Playlist};
+pub(crate) use api::{ApiPage, Playlist, Track};
+pub(crate) use import::{
+    ImportOutcome, import_path, import_url_or_uri, is_spotify_url_or_uri, scan_downloads,
+    sync_account,
+};
 
 pub(crate) fn client_id() -> Option<String> {
     config::load_client_id()
@@ -17,12 +21,17 @@ pub(crate) fn save_client_id(client_id: &str) -> Result<String, String> {
     config::save_client_id(client_id)
 }
 
+pub(crate) fn is_connected(client_id: &str) -> bool {
+    let client_id = client_id.trim();
+    !client_id.is_empty() && auth::has_token(client_id)
+}
+
 pub(crate) fn connect(client_id: &str) -> Result<(), String> {
     auth::connect(client_id)
 }
 
-pub(crate) fn search_tracks(client_id: &str, query: &str) -> Result<Vec<Track>, String> {
-    with_access_token(client_id, |token| api::search_tracks(token, query))
+pub(crate) fn disconnect(client_id: &str) -> Result<(), String> {
+    auth::clear_token(client_id.trim())
 }
 
 pub(crate) fn is_valid_track_uri(uri: &str) -> bool {
@@ -38,6 +47,10 @@ pub(crate) fn saved_tracks(client_id: &str, offset: u32) -> Result<ApiPage<Track
 
 pub(crate) fn playlists(client_id: &str, offset: u32) -> Result<ApiPage<Playlist>, String> {
     with_access_token(client_id, |token| api::playlists(token, offset))
+}
+
+pub(crate) fn playlist_meta(client_id: &str, playlist_id: &str) -> Result<Playlist, String> {
+    with_access_token(client_id, |token| api::playlist_meta(token, playlist_id))
 }
 
 pub(crate) fn playlist_tracks(
@@ -79,7 +92,7 @@ fn with_access_token<T>(
     }
 }
 
-fn is_valid_id(id: &str) -> bool {
+pub(super) fn is_valid_id(id: &str) -> bool {
     id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 

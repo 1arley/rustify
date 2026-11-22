@@ -206,6 +206,7 @@ struct Worker {
     notice: Option<String>,
     volume: f64,
     sender: mpsc::Sender<Request>,
+    state: Arc<Mutex<PlaybackState>>,
     generation: u64,
     suggesting: bool,
     exhausted_at_len: Option<usize>,
@@ -262,16 +263,56 @@ impl Worker {
             let Some(index) = self.queue.index() else {
                 return;
             };
-            let item = &self.queue.entries[index].item;
             // Each selection owns its event queue, including when a URL is selected twice.
             if self.phase != Phase::Idle || self.engine.is_err() {
                 self.engine = engine();
             }
             self.phase = Phase::Loading;
+            self.publish();
+
+            if let TrackId::Spotify(sp_key) = self.queue.entries[index].item.track_id.clone() {
+                let title = self.queue.entries[index].item.title.clone();
+                let artist = self.queue.entries[index].item.artist.clone();
+                let duration = self.queue.entries[index].item.duration;
+
+                let resolved = match crate::library::lookup_resolved_youtube_id(&sp_key) {
+                    Some(yt_id) => Ok(yt_id),
+                    None => {
+                        match crate::catalog::resolve_spotify_to_youtube(&title, &artist, duration)
+                        {
+                            Ok(yt_id) => {
+                                crate::library::record_resolved_youtube_id(&sp_key, &yt_id);
+                                Ok(yt_id)
+                            }
+                            Err(err) => Err(err),
+                        }
+                    }
+                };
+
+                match resolved {
+                    Ok(yt_id) => {
+                        let new_id = TrackId::Youtube(yt_id);
+                        self.queue.entries[index].item.track_id = new_id.clone();
+                        if let Some(seed) = &mut self.queue.seed
+                            && seed.track_id == TrackId::Spotify(sp_key)
+                        {
+                            seed.track_id = new_id;
+                        }
+                    }
+                    Err(err) => {
+                        if !self.fail(err) {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            let stream_url = self.queue.entries[index].item.track_id.stream_url();
             let result = self.engine.as_ref().map_err(Clone::clone).and_then(|mpv| {
                 mpv.set_property("volume", self.volume)
                     .map_err(|e| e.to_string())?;
-                load(mpv, &item.track_id.stream_url())
+                load(mpv, &stream_url)
             });
             match result {
                 Ok(()) => return,
@@ -446,8 +487,8 @@ impl Worker {
             }
         }
     }
-    fn publish(&mut self, state: &Mutex<PlaybackState>) {
-        let Ok(mut s) = state.lock() else { return };
+    fn publish(&mut self) {
+        let Ok(mut s) = self.state.lock() else { return };
         s.connected = self.engine.is_ok();
         s.current_index = self.queue.index();
         if s.queue != self.queue.entries {
@@ -503,6 +544,7 @@ fn run_player(
         notice: None,
         volume: 50.,
         sender,
+        state,
         generation: 0,
         suggesting: false,
         exhausted_at_len: None,
@@ -514,9 +556,9 @@ fn run_player(
                 worker.suggesting = false;
                 worker.exhausted_at_len = None;
                 worker.queue.replace(items, index);
+                let _ = reply.send(Ok(()));
                 worker.start(false);
                 worker.maybe_request_suggestions();
-                let _ = reply.send(Ok(()));
             }
             Ok(Request::Queue(command, reply)) => {
                 let res = worker.queue.edit(command);
@@ -553,7 +595,7 @@ fn run_player(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         worker.poll();
-        worker.publish(&state);
+        worker.publish();
     }
 }
 #[cfg(test)]
@@ -603,6 +645,7 @@ mod tests {
             notice: None,
             volume: 0.,
             sender: mpsc::channel().0,
+            state: Arc::new(Mutex::new(PlaybackState::default())),
             generation: 0,
             suggesting: false,
             exhausted_at_len: None,

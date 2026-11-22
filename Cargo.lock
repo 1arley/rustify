@@ -4674,23 +4674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rea-spotify"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "gpui",
- "gpui-component",
- "libc",
- "libmpv2",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
- "url",
-]
-
-[[package]]
 name = "read-fonts"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4940,6 +4923,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustify"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "gpui",
+ "gpui-component",
+ "libc",
+ "libmpv2",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+ "url",
 ]
 
 [[package]]

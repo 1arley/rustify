@@ -281,7 +281,7 @@ fn storage_path(file_name: &str) -> Result<PathBuf, String> {
         .filter(|path| path.is_absolute())
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
         .ok_or_else(|| "XDG_DATA_HOME e HOME não estão definidos.".to_owned())?;
-    Ok(data_dir.join("rea-spotify").join(file_name))
+    Ok(data_dir.join("rustify").join(file_name))
 }
 
 #[cfg(test)]

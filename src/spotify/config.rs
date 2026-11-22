@@ -37,7 +37,7 @@ pub(super) fn config_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(root.join("rea-spotify"))
+    Some(root.join("rustify"))
 }
 
 fn config_path() -> Option<PathBuf> {

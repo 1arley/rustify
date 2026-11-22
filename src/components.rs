@@ -92,7 +92,7 @@ fn image_agent() -> &'static ureq::Agent {
 
 impl HttpClient for Http {
     fn type_name(&self) -> &'static str {
-        "rea_spotify::components::Http"
+        "rustify::components::Http"
     }
 
     fn user_agent(&self) -> Option<&HeaderValue> {

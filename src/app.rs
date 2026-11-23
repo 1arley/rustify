@@ -15,8 +15,8 @@ use crate::playback::{self, PlaybackCommand, PlaybackItem, PlaybackState, QueueC
 use crate::spotify;
 use crate::youtube;
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, Render, Subscription, Timer, Window,
-    TitlebarOptions, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    AnyElement, App, Application, Bounds, Context, Render, Subscription, Timer, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::slider::{Slider, SliderState};
@@ -3044,7 +3044,7 @@ impl Home {
                                 } else {
                                     menu
                                 }
-                            })
+                            }),
                     )
             })
             .collect();

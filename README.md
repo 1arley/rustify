@@ -76,6 +76,12 @@ cargo build --release
 ./target/release/rustify
 ```
 
+Or install from crates.io (same system dependencies required):
+
+```sh
+cargo install rustify-player
+```
+
 To add the menu entry/icon from a source checkout:
 
 ```sh
@@ -157,3 +163,6 @@ See [PRIVACY.md](PRIVACY.md) for filenames, retention, sync, and removal behavio
 | `src/playback.rs`, `src/queue.rs` | libmpv playback and queue |
 | `src/library.rs` | Local library storage |
 | `src/spotify/` | Spotify account integration, API, and data import |
+## License
+
+[MIT](LICENSE)

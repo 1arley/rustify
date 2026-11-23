@@ -1,7 +1,18 @@
 [package]
-name = "rustify"
+name = "rustify-player"
 version = "0.2.0"
 edition = "2024"
+description = "Native desktop music player built with Rust, GPUI, and libmpv"
+license = "MIT"
+repository = "https://github.com/1arley/rustify"
+readme = "README.md"
+keywords = ["music", "player", "spotify", "youtube", "gpui"]
+categories = ["multimedia::audio"]
+exclude = [".github/", ".cargo/", "docs/", "graphify-out/"]
+
+[[bin]]
+name = "rustify"
+path = "src/main.rs"
 
 [dependencies]
 base64 = "=0.22.1"

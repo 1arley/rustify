@@ -91,7 +91,7 @@ def main():
     open(cargo_path, "w").write(new_cargo)
 
     # Refresh only this crate's entry in the lockfile.
-    subprocess.run(["cargo", "update", "-p", "rustify"], check=True)
+    subprocess.run(["cargo", "update", "-p", "rustify-player"], check=True)
 
     write_output(github_output, {"bump": bump, "version": new_version})
     print(f"Bumped {current} -> {new_version} ({bump})")

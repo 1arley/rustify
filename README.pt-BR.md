@@ -76,6 +76,12 @@ cargo build --release
 ./target/release/rustify
 ```
 
+Ou instale pelo crates.io (mesmas dependências de sistema necessárias):
+
+```sh
+cargo install rustify-player
+```
+
 Para adicionar a entrada/ícone no menu a partir do código:
 
 ```sh
@@ -157,3 +163,6 @@ Consulte [PRIVACY.md](PRIVACY.md) para nomes dos arquivos, retenção, sincroniz
 | `src/playback.rs`, `src/queue.rs` | Reprodução via libmpv e fila |
 | `src/library.rs` | Persistência local da biblioteca |
 | `src/spotify/` | Integração de conta, API e importação de dados do Spotify |
+## Licença
+
+[MIT](LICENSE)

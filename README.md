@@ -15,9 +15,80 @@
   <a href="README.pt-BR.md">Português (Brasil)</a>
 </p>
 
-<!-- Add a screenshot or short GIF here, e.g.:
-<p align="center"><img src="public/screenshot.png" alt="Rustify main window" width="800"></p>
--->
+## Use it now
+
+### Linux (including Omarchy / Arch)
+
+```sh
+# 1. Install libmpv (one time)
+sudo pacman -S mpv
+
+# 2. Download the latest Linux release, extract it, then:
+cd rustify-linux-x86_64
+./install.sh
+```
+
+Open **Rustify** from your app menu. Done.
+
+### Ubuntu / Debian
+
+```sh
+sudo apt install libmpv2
+# Download and extract the Linux release, then:
+cd rustify-linux-x86_64
+./install.sh
+```
+
+### Fedora
+
+```sh
+sudo dnf install mpv-libs
+# Download and extract the Linux release, then:
+cd rustify-linux-x86_64
+./install.sh
+```
+
+### macOS
+
+```sh
+brew install mpv
+# Download and extract the macOS release, then:
+./rustify
+```
+
+### Windows
+
+1. Install `mpv`/`libmpv` (MSYS2 UCRT64 package recommended for now).
+2. Download and extract the Windows release.
+3. Double-click `rustify.exe`.
+
+> `yt-dlp` is already included in the release package. You do not need to install it.
+
+## If you just want to run it without installing
+
+Download the release for your platform from [Releases](https://github.com/1arley/rustify/releases), extract, and run the `rustify` binary inside the folder. Keep `yt-dlp` in the same folder as `rustify`.
+
+## Build from source (developers)
+
+```sh
+# Install libmpv dev files + yt-dlp for your OS, then:
+cargo build --release
+./target/release/rustify
+```
+
+To add the menu entry/icon from a source checkout:
+
+```sh
+./scripts/install.sh
+```
+
+## What you need
+
+| Thing | Do you need to install it? |
+| --- | --- |
+| `libmpv` | **Yes**, once. Commands above. |
+| `yt-dlp` | **No**, bundled in release packages. |
+| Rust / Cargo | Only if building from source. |
 
 ## Why Rustify
 
@@ -28,17 +99,6 @@
 
 > [!NOTE]
 > Rustify does not play Spotify streams. It uses Spotify metadata to import your library and looks for matching tracks on YouTube for playback. Availability depends on external catalogs and services.
-
-## Contents
-
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Requirements](#requirements)
-- [Platform status](#platform-status)
-- [Importing your music](#importing-your-music)
-- [Responsive layout](#responsive-layout)
-- [Local data and privacy](#local-data-and-privacy)
-- [Code layout](#code-layout)
 
 ## Features
 
@@ -63,66 +123,22 @@
 
 - Responsive desktop layout with compact navigation and a mini-player for narrow windows.
 
-## Quick start
+## Importing your music
 
-1. Install the [requirements](#requirements) for your OS (`libmpv` and `yt-dlp`).
-2. Clone the repository and run it:
+Open **Library → Import**. You can:
 
-   ```sh
-   cargo run
-   ```
+- Paste a **YouTube playlist link** to save its metadata without downloading audio.
+- Paste a **public Spotify link or URI**.
+- Choose **exported files** from your computer.
+- Enter a **Spotify Developer Dashboard Client ID** to sync an account (optional).
 
-3. Search for a track, or open **Library → Import** to bring in your music.
+Supported exports: `Playlist1.json`, `YourLibrary.json`, `StreamingHistory*.json`, Spotify Account Data/MyData folders, and Exportify CSV files.
 
-## Installation
+## Local data and privacy
 
-### Run from source
+Rustify stores its data in the operating system's user config and local data directories, resolved through `dirs`. Linux respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`; Windows and macOS use their standard user folders.
 
-```sh
-cargo build --release
-./target/release/rustify
-```
-
-### Desktop integration (Linux)
-
-Rustify ships a `.desktop` file and icons in `packaging/`. To add it to your application menu (including Omarchy):
-
-```sh
-./scripts/install.sh
-```
-
-This installs the binary to `~/.local/bin/rustify`, the launcher to `~/.local/share/applications/`, and the icons to `~/.local/share/icons/`. Log out and back in if the entry does not appear immediately.
-
-If the binary is somewhere else (for example a downloaded release), pass its path:
-
-```sh
-./scripts/install.sh ./rustify
-```
-
-### Using a downloaded release
-
-Download the archive for your platform from the [Releases](https://github.com/1arley/rustify/releases) page, extract it, and run the `rustify` binary. On Linux you can add the menu entry and icon with `./scripts/install.sh ./rustify` (the `packaging/` and `scripts/` folders are available in the repository).
-
-> On Linux the menu icon comes from the installed `.desktop`/icon files, not from the binary itself. The Windows build embeds the icon in the executable.
-
-## Requirements
-
-| Requirement | Why it is needed |
-| --- | --- |
-| Stable Rust with edition 2024 support | Building the app |
-| `libmpv` and audio codecs | Playback |
-| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on your `PATH` | YouTube search, playlist import, and matching imported Spotify tracks |
-| Internet access | Querying catalogs and playing streams |
-
-For local builds you also need the `libmpv` **development files** for your OS:
-
-| OS | Setup |
-| --- | --- |
-| Linux | Install your distribution's `libmpv` development package. |
-| macOS | Install `mpv` with Homebrew. |
-| Windows | The CI path uses the `x86_64-pc-windows-gnu` Rust target with MSYS2 UCRT64 packages. |
-
-On Linux, file selection uses the XDG desktop portal and falls back to `zenity` when the portal cannot open a dialog.
+See [PRIVACY.md](PRIVACY.md) for filenames, retention, sync, and removal behavior.
 
 ## Platform status
 
@@ -131,44 +147,6 @@ On Linux, file selection uses the XDG desktop portal and falls back to `zenity` 
 | Linux x86_64 | Exercised locally |
 | Windows x86_64 | Native CI job configured; first run and interactive audio check pending |
 | macOS arm64 | Native CI job configured; first run and interactive audio check pending |
-
-Builds require a native `libmpv`. The distribution format and bundled codecs have not been selected yet.
-
-## Importing your music
-
-Open the import screen from the library. You can:
-
-- Paste a **YouTube playlist link** to save its metadata without downloading audio.
-- Paste a **public Spotify link or URI**.
-- Choose **exported files** from your computer.
-- Enter a **Spotify Developer Dashboard Client ID** to sync an account (optional).
-
-Supported exports:
-
-| Source | Files |
-| --- | --- |
-| Spotify data export | `Playlist1.json`, `YourLibrary.json`, `StreamingHistory*.json`, or the Account Data / MyData folder |
-| Exportify | CSV files |
-
-## Responsive layout
-
-The main navigation is **Home**, **Search**, and **Library**. Import lives in the library; the queue and Now Playing are available from the player.
-
-| Window width | Behavior |
-| --- | --- |
-| 1280 px and wider | Now Playing side panel can be shown or hidden |
-| 1040 px and wider | Full player controls |
-| Below 1040 px | Compact player |
-| 900 px and below | Narrower sidebar |
-| 620 px and below | Navigation moves to the bottom |
-
-The layout was visually checked at 1440×900, 1280×800, 768×1024, and 390×844 with demo data.
-
-## Local data and privacy
-
-Rustify stores its data in the operating system's user config and local data directories, resolved through `dirs`. Linux respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`; Windows and macOS use their standard user folders.
-
-See [PRIVACY.md](PRIVACY.md) for filenames, retention, sync, and removal behavior.
 
 ## Code layout
 

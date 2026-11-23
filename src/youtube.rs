@@ -1,9 +1,7 @@
-use std::process::Command;
-
 use serde::Deserialize;
 use url::Url;
 
-use crate::catalog::{Track, TrackId, youtube_id};
+use crate::catalog::{Track, TrackId, youtube_id, yt_dlp_command};
 use crate::library::SavedPlaylist;
 
 const MAX_PLAYLIST_TRACKS: usize = 500;
@@ -37,7 +35,7 @@ struct Video {
 pub(crate) fn import_playlist(raw_url: &str) -> Result<SavedPlaylist, String> {
     let (playlist_id, url) = playlist_url(raw_url)?;
     let limit = MAX_PLAYLIST_TRACKS.to_string();
-    let output = Command::new("yt-dlp")
+    let output = yt_dlp_command()
         .args([
             "--ignore-config",
             "--no-warnings",

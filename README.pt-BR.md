@@ -15,9 +15,80 @@
   <a href="README.pt-BR.md">Português (Brasil)</a>
 </p>
 
-<!-- Adicione uma captura ou GIF curto aqui, por exemplo:
-<p align="center"><img src="public/screenshot.png" alt="Janela principal do Rustify" width="800"></p>
--->
+## Use agora
+
+### Linux (incluindo Omarchy / Arch)
+
+```sh
+# 1. Instale o libmpv (uma vez só)
+sudo pacman -S mpv
+
+# 2. Baixe a release Linux mais recente, extraia e:
+cd rustify-linux-x86_64
+./install.sh
+```
+
+Abra **Rustify** no menu de aplicativos. Pronto.
+
+### Ubuntu / Debian
+
+```sh
+sudo apt install libmpv2
+# Baixe e extraia a release Linux, depois:
+cd rustify-linux-x86_64
+./install.sh
+```
+
+### Fedora
+
+```sh
+sudo dnf install mpv-libs
+# Baixe e extraia a release Linux, depois:
+cd rustify-linux-x86_64
+./install.sh
+```
+
+### macOS
+
+```sh
+brew install mpv
+# Baixe e extraia a release macOS, depois:
+./rustify
+```
+
+### Windows
+
+1. Instale `mpv`/`libmpv` (por enquanto, recomendado o pacote MSYS2 UCRT64).
+2. Baixe e extraia a release do Windows.
+3. Clique duas vezes em `rustify.exe`.
+
+> O `yt-dlp` já vem incluído no pacote da release. Você não precisa instalar.
+
+## Se quiser só rodar sem instalar
+
+Baixe a release da sua plataforma em [Releases](https://github.com/1arley/rustify/releases), extraia e execute o binário `rustify` dentro da pasta. Mantenha o `yt-dlp` na mesma pasta do `rustify`.
+
+## Compilar a partir do código (desenvolvedores)
+
+```sh
+# Instale os arquivos de desenvolvimento do libmpv + yt-dlp no seu sistema, depois:
+cargo build --release
+./target/release/rustify
+```
+
+Para adicionar a entrada/ícone no menu a partir do código:
+
+```sh
+./scripts/install.sh
+```
+
+## O que você precisa
+
+| Coisa | Precisa instalar? |
+| --- | --- |
+| `libmpv` | **Sim**, uma vez. Comandos acima. |
+| `yt-dlp` | **Não**, já vem no pacote da release. |
+| Rust / Cargo | Só se for compilar do código. |
 
 ## Por que o Rustify
 
@@ -28,17 +99,6 @@
 
 > [!NOTE]
 > O Rustify não reproduz streams do Spotify. Ele usa os metadados do Spotify para importar a biblioteca e procura correspondências no YouTube para reproduzir essas faixas. A disponibilidade depende de catálogos e serviços externos.
-
-## Conteúdo
-
-- [Funcionalidades](#funcionalidades)
-- [Início rápido](#início-rápido)
-- [Requisitos](#requisitos)
-- [Estado das plataformas](#estado-das-plataformas)
-- [Importando sua música](#importando-sua-música)
-- [Layout responsivo](#layout-responsivo)
-- [Dados locais e privacidade](#dados-locais-e-privacidade)
-- [Estrutura do código](#estrutura-do-código)
 
 ## Funcionalidades
 
@@ -63,66 +123,22 @@
 
 - Layout responsivo com navegação compacta e mini-player em janelas estreitas.
 
-## Início rápido
+## Importando sua música
 
-1. Instale os [requisitos](#requisitos) do seu sistema (`libmpv` e `yt-dlp`).
-2. Clone o repositório e execute:
+Abra **Biblioteca → Importar**. Você pode:
 
-   ```sh
-   cargo run
-   ```
+- Colar o **link de uma playlist do YouTube** para salvar seus metadados sem baixar áudio.
+- Colar um **link ou URI público do Spotify**.
+- Escolher **arquivos exportados** do seu computador.
+- Informar um **Client ID do Spotify Developer Dashboard** para sincronizar uma conta (opcional).
 
-3. Pesquise uma faixa ou abra **Biblioteca → Importar** para trazer sua música.
+Exportações suportadas: `Playlist1.json`, `YourLibrary.json`, `StreamingHistory*.json`, pastas Spotify Account Data/MyData e arquivos CSV do Exportify.
 
-## Instalação
+## Dados locais e privacidade
 
-### Executar a partir do código
+O Rustify armazena seus dados nas pastas de configuração e dados locais do sistema operacional, resolvidas por meio de `dirs`. No Linux, respeita `XDG_CONFIG_HOME` e `XDG_DATA_HOME`; Windows e macOS usam as pastas padrão do usuário.
 
-```sh
-cargo build --release
-./target/release/rustify
-```
-
-### Integração com o desktop (Linux)
-
-O Rustify inclui um arquivo `.desktop` e ícones em `packaging/`. Para adicionar ao menu de aplicativos (inclusive Omarchy):
-
-```sh
-./scripts/install.sh
-```
-
-Isso instala o binário em `~/.local/bin/rustify`, o lançador em `~/.local/share/applications/` e os ícones em `~/.local/share/icons/`. Saia e entre novamente se a entrada não aparecer de imediato.
-
-Se o binário estiver em outro lugar (por exemplo, uma release baixada), informe o caminho:
-
-```sh
-./scripts/install.sh ./rustify
-```
-
-### Usando uma release baixada
-
-Baixe o arquivo da sua plataforma na página de [Releases](https://github.com/1arley/rustify/releases), extraia e execute o binário `rustify`. No Linux você pode adicionar a entrada de menu e o ícone com `./scripts/install.sh ./rustify` (as pastas `packaging/` e `scripts/` estão disponíveis no repositório).
-
-> No Linux o ícone do menu vem dos arquivos `.desktop`/ícone instalados, não do próprio binário. No build do Windows o ícone é embutido no executável.
-
-## Requisitos
-
-| Requisito | Por que é necessário |
-| --- | --- |
-| Rust estável com suporte à edition 2024 | Compilar o app |
-| `libmpv` e codecs de áudio | Reprodução |
-| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) no `PATH` | Busca, importação de playlists do YouTube e correspondência de faixas importadas do Spotify |
-| Acesso à internet | Consultar catálogos e reproduzir streams |
-
-Para compilar localmente você também precisa dos **arquivos de desenvolvimento** do `libmpv` para o seu sistema:
-
-| Sistema | Configuração |
-| --- | --- |
-| Linux | Instale o pacote de desenvolvimento `libmpv` da sua distribuição. |
-| macOS | Instale `mpv` com o Homebrew. |
-| Windows | O caminho de CI usa o target Rust `x86_64-pc-windows-gnu` com pacotes MSYS2 UCRT64. |
-
-No Linux, a seleção de arquivos usa o portal de desktop XDG e recorre ao `zenity` se o portal não abrir o diálogo.
+Consulte [PRIVACY.md](PRIVACY.md) para nomes dos arquivos, retenção, sincronização e remoção.
 
 ## Estado das plataformas
 
@@ -131,44 +147,6 @@ No Linux, a seleção de arquivos usa o portal de desktop XDG e recorre ao `zeni
 | Linux x86_64 | Exercitado localmente |
 | Windows x86_64 | Job nativo de CI configurado; primeira execução e teste interativo de áudio pendentes |
 | macOS arm64 | Job nativo de CI configurado; primeira execução e teste interativo de áudio pendentes |
-
-Os builds exigem `libmpv` nativo. O formato de distribuição e o empacotamento de codecs ainda não foram definidos.
-
-## Importando sua música
-
-Abra a tela de importação a partir da biblioteca. Você pode:
-
-- Colar o **link de uma playlist do YouTube** para salvar seus metadados sem baixar áudio.
-- Colar um **link ou URI público do Spotify**.
-- Escolher **arquivos exportados** do seu computador.
-- Informar um **Client ID do Spotify Developer Dashboard** para sincronizar uma conta (opcional).
-
-Exportações suportadas:
-
-| Origem | Arquivos |
-| --- | --- |
-| Exportação de dados do Spotify | `Playlist1.json`, `YourLibrary.json`, `StreamingHistory*.json` ou a pasta Account Data / MyData |
-| Exportify | Arquivos CSV |
-
-## Layout responsivo
-
-A navegação principal reúne **Início**, **Buscar** e **Biblioteca**. A importação fica na biblioteca; fila e Tocando agora ficam acessíveis pelo player.
-
-| Largura da janela | Comportamento |
-| --- | --- |
-| 1280 px ou mais | Painel Tocando agora pode ser exibido ou recolhido |
-| 1040 px ou mais | Controles completos do player |
-| Abaixo de 1040 px | Player compacto |
-| 900 px ou menos | Navegação lateral compacta |
-| 620 px ou menos | Navegação vai para a parte inferior |
-
-O layout foi conferido visualmente em 1440×900, 1280×800, 768×1024 e 390×844 com dados de demonstração.
-
-## Dados locais e privacidade
-
-O Rustify armazena seus dados nas pastas de configuração e dados locais do sistema operacional, resolvidas por meio de `dirs`. No Linux, respeita `XDG_CONFIG_HOME` e `XDG_DATA_HOME`; Windows e macOS usam as pastas padrão do usuário.
-
-Consulte [PRIVACY.md](PRIVACY.md) para nomes dos arquivos, retenção, sincronização e remoção.
 
 ## Estrutura do código
 

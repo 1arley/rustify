@@ -18,12 +18,18 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset: rustify-linux-x86_64.tar.gz
+            ytdlp_url: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
+            ytdlp_name: yt-dlp
           - os: windows-2025
             target: x86_64-pc-windows-gnu
             asset: rustify-windows-x86_64.zip
+            ytdlp_url: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
+            ytdlp_name: yt-dlp.exe
           - os: macos-15
             target: aarch64-apple-darwin
             asset: rustify-macos-aarch64.tar.gz
+            ytdlp_url: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
+            ytdlp_name: yt-dlp
 
     runs-on: ${{ matrix.os }}
 
@@ -78,21 +84,36 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package (Unix)
+      - name: Prepare package (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
+          pkg="dist/${{ matrix.asset }}"
+          name="${pkg%.tar.gz}"
+          name="$(basename "$name")"
+          mkdir -p "stage/$name"
+          cp "target/${{ matrix.target }}/release/rustify" "stage/$name/rustify"
+          curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
+          chmod +x "stage/$name/rustify" "stage/$name/${{ matrix.ytdlp_name }}"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cp scripts/install.sh "stage/$name/install.sh"
+            chmod +x "stage/$name/install.sh"
+            cp -r packaging "stage/$name/packaging"
+          fi
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/rustify" "dist/"
-          tar -czf "dist/${{ matrix.asset }}" -C dist rustify
+          tar -czf "dist/${{ matrix.asset }}" -C stage "$name"
 
-      - name: Package (Windows)
+      - name: Prepare package (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/rustify.exe" "dist/"
-          Compress-Archive -Path "dist/rustify.exe" -DestinationPath "dist/${{ matrix.asset }}"
+          set -euo pipefail
+          name="rustify-windows-x86_64"
+          mkdir -p "stage/$name" dist
+          cp "target/${{ matrix.target }}/release/rustify.exe" "stage/$name/"
+          curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
+          pwsh -Command "Compress-Archive -Path 'stage/$name/*' -DestinationPath 'dist/${{ matrix.asset }}'"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

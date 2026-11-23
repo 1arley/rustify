@@ -171,6 +171,26 @@ fn extract_title_artist(title: &str) -> Option<&str> {
     None
 }
 
+fn yt_dlp_name() -> &'static str {
+    if cfg!(windows) {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    }
+}
+
+pub(crate) fn bundled_yt_dlp() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join(yt_dlp_name());
+    candidate.is_file().then_some(candidate)
+}
+
+pub(crate) fn yt_dlp_command() -> std::process::Command {
+    let program = bundled_yt_dlp().unwrap_or_else(|| std::path::PathBuf::from(yt_dlp_name()));
+    std::process::Command::new(program)
+}
+
 fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
     #[derive(Deserialize)]
     struct Video {
@@ -184,7 +204,7 @@ fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
         duration: Option<f64>,
     }
     let limit_arg = limit.to_string();
-    let output = std::process::Command::new("yt-dlp")
+    let output = yt_dlp_command()
         .args([
             "--ignore-config",
             "--socket-timeout",

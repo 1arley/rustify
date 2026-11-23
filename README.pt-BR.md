@@ -74,6 +74,37 @@
 
 3. Pesquise uma faixa ou abra **Biblioteca → Importar** para trazer sua música.
 
+## Instalação
+
+### Executar a partir do código
+
+```sh
+cargo build --release
+./target/release/rustify
+```
+
+### Integração com o desktop (Linux)
+
+O Rustify inclui um arquivo `.desktop` e ícones em `packaging/`. Para adicionar ao menu de aplicativos (inclusive Omarchy):
+
+```sh
+./scripts/install.sh
+```
+
+Isso instala o binário em `~/.local/bin/rustify`, o lançador em `~/.local/share/applications/` e os ícones em `~/.local/share/icons/`. Saia e entre novamente se a entrada não aparecer de imediato.
+
+Se o binário estiver em outro lugar (por exemplo, uma release baixada), informe o caminho:
+
+```sh
+./scripts/install.sh ./rustify
+```
+
+### Usando uma release baixada
+
+Baixe o arquivo da sua plataforma na página de [Releases](https://github.com/1arley/rustify/releases), extraia e execute o binário `rustify`. No Linux você pode adicionar a entrada de menu e o ícone com `./scripts/install.sh ./rustify` (as pastas `packaging/` e `scripts/` estão disponíveis no repositório).
+
+> No Linux o ícone do menu vem dos arquivos `.desktop`/ícone instalados, não do próprio binário. No build do Windows o ícone é embutido no executável.
+
 ## Requisitos
 
 | Requisito | Por que é necessário |

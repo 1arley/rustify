@@ -74,6 +74,37 @@
 
 3. Search for a track, or open **Library → Import** to bring in your music.
 
+## Installation
+
+### Run from source
+
+```sh
+cargo build --release
+./target/release/rustify
+```
+
+### Desktop integration (Linux)
+
+Rustify ships a `.desktop` file and icons in `packaging/`. To add it to your application menu (including Omarchy):
+
+```sh
+./scripts/install.sh
+```
+
+This installs the binary to `~/.local/bin/rustify`, the launcher to `~/.local/share/applications/`, and the icons to `~/.local/share/icons/`. Log out and back in if the entry does not appear immediately.
+
+If the binary is somewhere else (for example a downloaded release), pass its path:
+
+```sh
+./scripts/install.sh ./rustify
+```
+
+### Using a downloaded release
+
+Download the archive for your platform from the [Releases](https://github.com/1arley/rustify/releases) page, extract it, and run the `rustify` binary. On Linux you can add the menu entry and icon with `./scripts/install.sh ./rustify` (the `packaging/` and `scripts/` folders are available in the repository).
+
+> On Linux the menu icon comes from the installed `.desktop`/icon files, not from the binary itself. The Windows build embeds the icon in the executable.
+
 ## Requirements
 
 | Requirement | Why it is needed |

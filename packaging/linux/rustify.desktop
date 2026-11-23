@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rustify
+Comment=Desktop music player built with Rust, GPUI, and libmpv
+Exec=rustify
+Icon=rustify
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=rustify

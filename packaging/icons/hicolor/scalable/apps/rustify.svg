@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Rustify">
+  <title>Rustify</title>
+  <defs><linearGradient id="bg" x1="80" y1="0" x2="440" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F26A1B"/><stop offset="1" stop-color="#A8380F"/>
+    </linearGradient>
+    <linearGradient id="fg" x1="0" y1="120" x2="0" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFE3D0"/>
+    </linearGradient></defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/><path transform="translate(-15,0)" d="M150,120 H285 C345,120 385,158 385,212 C385,258 357,290 318,302 L392,392 H325 L258,310 H210 V392 H150 Z M244,169 L324,215 L244,261 Z" fill="url(#fg)" fill-rule="evenodd"/>
+</svg>

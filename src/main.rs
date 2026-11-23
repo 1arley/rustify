@@ -7,6 +7,8 @@ mod library;
 mod playback;
 mod queue;
 mod spotify;
+#[cfg(test)]
+mod ui_tests;
 mod youtube;
 
 fn main() {

@@ -19,7 +19,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::slider::{Slider, SliderState};
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{
     Disableable, Root,
     button::ButtonVariants,
@@ -88,6 +88,10 @@ struct Home {
     _url_subscription: Subscription,
     _youtube_url_subscription: Subscription,
     _file_subscription: Subscription,
+    _volume_subscription: Subscription,
+    _volume_page_subscription: Subscription,
+    _seek_subscription: Subscription,
+    _seek_page_subscription: Subscription,
     results: Vec<Track>,
     active_page: ActivePage,
     show_details: bool,
@@ -187,6 +191,45 @@ impl Home {
         let seek_page = cx.new(|_| SliderState::new().max(100.).step(0.1));
         let volume = cx.new(|_| SliderState::new().max(100.).default_value(50.));
         let volume_page = cx.new(|_| SliderState::new().max(100.).default_value(50.));
+        let _seek_subscription = cx.subscribe(&seek, |this, _, event: &SliderEvent, cx| {
+            match event {
+                SliderEvent::Change(_) => {
+                    this.active_seek = Some(SeekSlider::Player);
+                    cx.notify();
+                }
+            }
+        });
+        let _seek_page_subscription = cx.subscribe(&seek_page, |this, _, event: &SliderEvent, cx| {
+            match event {
+                SliderEvent::Change(_) => {
+                    this.active_seek = Some(SeekSlider::Page);
+                    cx.notify();
+                }
+            }
+        });
+        let _volume_subscription = cx.subscribe(&volume, |this, _, event: &SliderEvent, cx| {
+            match event {
+                SliderEvent::Change(value) => {
+                    this.active_volume = Some(VolumeSlider::Player);
+                    if this.playback.connected {
+                        this.run_command(PlaybackCommand::Volume(value.start()), cx);
+                    }
+                    cx.notify();
+                }
+            }
+        });
+        let _volume_page_subscription =
+            cx.subscribe(&volume_page, |this, _, event: &SliderEvent, cx| {
+                match event {
+                    SliderEvent::Change(value) => {
+                        this.active_volume = Some(VolumeSlider::Page);
+                        if this.playback.connected {
+                            this.run_command(PlaybackCommand::Volume(value.start()), cx);
+                        }
+                        cx.notify();
+                    }
+                }
+            });
         Self {
             seek,
             seek_page,
@@ -208,6 +251,10 @@ impl Home {
             _url_subscription,
             _youtube_url_subscription,
             _file_subscription,
+            _volume_subscription,
+            _volume_page_subscription,
+            _seek_subscription,
+            _seek_page_subscription,
             results: Vec::new(),
             active_page: ActivePage::Home,
             show_details: true,
@@ -413,8 +460,6 @@ impl Home {
         target: VolumeSlider,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let volume_on_release = slider.clone();
-        let volume_on_release_out = slider.clone();
         let id = match target {
             VolumeSlider::Page => "volume-page-slider",
             VolumeSlider::Player => "volume-player-slider",
@@ -439,12 +484,6 @@ impl Home {
                 cx.listener(move |this, _, _, cx| {
                     if this.active_volume == Some(target) {
                         this.active_volume = None;
-                        if this.playback.connected {
-                            this.run_command(
-                                PlaybackCommand::Volume(volume_on_release.read(cx).value().start()),
-                                cx,
-                            );
-                        }
                         cx.notify();
                     }
                 }),
@@ -454,14 +493,6 @@ impl Home {
                 cx.listener(move |this, _, _, cx| {
                     if this.active_volume == Some(target) {
                         this.active_volume = None;
-                        if this.playback.connected {
-                            this.run_command(
-                                PlaybackCommand::Volume(
-                                    volume_on_release_out.read(cx).value().start(),
-                                ),
-                                cx,
-                            );
-                        }
                         cx.notify();
                     }
                 }),

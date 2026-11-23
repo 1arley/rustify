@@ -32,5 +32,8 @@ url = "=2.5.8"
 
 # shortcut: Cargo.lock holds libc at 0.2.189 for GPUI 0.2.2's xattr 0.2.3 build; remove when that dependency chain is updated.
 
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

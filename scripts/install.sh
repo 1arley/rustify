@@ -66,6 +66,7 @@ WRAP
     chmod +x "$PREFIX/bin/rustify"
 else
     install -m755 "$BINARY" "$PREFIX/bin/rustify"
+    echo "Make sure libmpv is installed on your system (see README)."
 fi
 
 # Raster icons.
@@ -98,5 +99,4 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 echo "Rustify installed to $PREFIX/bin/rustify"
-echo "Make sure libmpv is installed on your system (see README)."
 echo "You may need to log out and back in for the menu entry to appear."

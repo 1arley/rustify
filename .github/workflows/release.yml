@@ -108,11 +108,10 @@ jobs:
           queue = [exe]
           while queue:
               cur = queue.pop()
-              try:
-                  out = subprocess.check_output(["ldd", cur], text=True, errors="ignore")
-              except Exception:
-                  continue
+              out = subprocess.check_output(["ldd", cur], text=True, errors="ignore")
               for line in out.splitlines():
+                  if "not found" in line.lower():
+                      raise SystemExit(f"Unresolved dependency for {cur}: {line.strip()}")
                   m = re.search(r'=>\s*(/[^\s]+)', line)
                   if not m:
                       continue
@@ -120,12 +119,16 @@ jobs:
                   base = os.path.basename(path)
                   if exclude.search(base):
                       continue
-                  if not os.path.isfile(path) or path in seen:
+                  if path in seen:
                       continue
+                  if not os.path.isfile(path):
+                      raise SystemExit(f"Dependency path does not exist: {path}")
                   seen.add(path)
                   shutil.copy2(path, os.path.join(libdir, base))
                   queue.append(path)
           print(f"Bundled {len(seen)} libs")
+          if not any(os.path.basename(path).startswith("libmpv.so") for path in seen):
+              raise SystemExit("libmpv was not included in the package")
           PY
             python3 /tmp/bundle_libs.py "stage/$name/rustify.bin" "stage/$name/lib"
             cat > "stage/$name/rustify" << 'SH'
@@ -164,7 +167,9 @@ jobs:
               text = subprocess.check_output(["ntldd", "-R", exe], text=True, errors="ignore")
           except Exception as e:
               print(e, file=sys.stderr)
-              text = ""
+              raise SystemExit("Could not inspect Windows DLL dependencies")
+          if "not found" in text.lower():
+              raise SystemExit("ntldd reported an unresolved DLL dependency")
           for line in text.splitlines():
               m = re.search(r'=>\s*([^\(]+)', line)
               if not m:
@@ -174,16 +179,23 @@ jobs:
                   continue
               if re.match(r'^/[a-zA-Z]/', path):
                   path = path[1] + ":" + path[2:]
-              if os.path.isfile(path) and path.lower() not in seen:
-                  shutil.copy2(path, out)
-                  seen.add(path.lower())
-          for dll in ["libmpv-2.dll","libwinpthread-1.dll","libgcc_s_seh-1.dll","libstdc++-6.dll"]:
+              if path.lower() in seen:
+                  continue
+              if not os.path.isfile(path):
+                  raise SystemExit(f"Dependency path does not exist: {path}")
+              shutil.copy2(path, out)
+              seen.add(path.lower())
+          required = ["libmpv-2.dll","libwinpthread-1.dll","libgcc_s_seh-1.dll","libstdc++-6.dll"]
+          for dll in required:
               for root in ["/ucrt64/bin", "C:/msys64/ucrt64/bin"]:
                   p = os.path.join(root, dll)
                   if os.path.isfile(p) and p.lower() not in seen:
                       shutil.copy2(p, out)
                       seen.add(p.lower())
                       break
+          missing = [dll for dll in required if not os.path.isfile(os.path.join(out, dll))]
+          if missing:
+              raise SystemExit(f"Missing required DLLs: {', '.join(missing)}")
           print(f"Bundled {len(seen)} DLLs")
           PY
           python3 /tmp/bundle_dlls.py "target/${{ matrix.target }}/release/rustify.exe" "stage/$name" \

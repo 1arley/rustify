@@ -20,33 +20,35 @@
 ### Linux (incluindo Omarchy / Arch)
 
 ```sh
-# 1. Instale o libmpv (uma vez só)
-sudo pacman -S mpv
-
-# 2. Baixe a release Linux mais recente, extraia e:
+# 1. Baixe a release Linux mais recente, extraia
+# 2. Rode:
 cd rustify-linux-x86_64
 ./install.sh
 ```
 
 Abra **Rustify** no menu de aplicativos. Pronto.
 
+> A release Linux inclui `yt-dlp` e a maioria das bibliotecas do `libmpv`. Se não abrir na sua distro, instale: `sudo pacman -S mpv`.
+
 ### Ubuntu / Debian
 
 ```sh
-sudo apt install libmpv2
 # Baixe e extraia a release Linux, depois:
 cd rustify-linux-x86_64
 ./install.sh
 ```
+
+Se não abrir, instale: `sudo apt install libmpv2`
 
 ### Fedora
 
 ```sh
-sudo dnf install mpv-libs
 # Baixe e extraia a release Linux, depois:
 cd rustify-linux-x86_64
 ./install.sh
 ```
+
+Se não abrir, instale: `sudo dnf install mpv-libs`
 
 ### macOS
 
@@ -58,11 +60,11 @@ brew install mpv
 
 ### Windows
 
-1. Instale `mpv`/`libmpv` (por enquanto, recomendado o pacote MSYS2 UCRT64).
-2. Baixe e extraia a release do Windows.
+1. Baixe a release do Windows em [Releases](https://github.com/1arley/rustify/releases).
+2. Extraia o zip.
 3. Clique duas vezes em `rustify.exe`.
 
-> O `yt-dlp` já vem incluído no pacote da release. Você não precisa instalar.
+> `libmpv` e `yt-dlp` já vêm incluídos na release do Windows. Não precisa instalar nada extra.
 
 ## Se quiser só rodar sem instalar
 
@@ -92,7 +94,7 @@ Para adicionar a entrada/ícone no menu a partir do código:
 
 | Coisa | Precisa instalar? |
 | --- | --- |
-| `libmpv` | **Sim**, uma vez. Comandos acima. |
+| `libmpv` | **Windows:** não (incluso). **Linux:** normalmente não (incluso), instale se necessário. **macOS:** sim (`brew install mpv`). |
 | `yt-dlp` | **Não**, já vem no pacote da release. |
 | Rust / Cargo | Só se for compilar do código. |
 

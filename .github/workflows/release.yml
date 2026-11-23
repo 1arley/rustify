@@ -68,6 +68,7 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-mpv
+            mingw-w64-ucrt-x86_64-ntldd
 
       - name: Add Windows native tools to PATH
         if: runner.os == 'Windows'
@@ -92,15 +93,56 @@ jobs:
           pkg="dist/${{ matrix.asset }}"
           name="${pkg%.tar.gz}"
           name="$(basename "$name")"
-          mkdir -p "stage/$name"
-          cp "target/${{ matrix.target }}/release/rustify" "stage/$name/rustify"
+          mkdir -p "stage/$name/lib"
+          cp "target/${{ matrix.target }}/release/rustify" "stage/$name/rustify.bin"
           curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
-          chmod +x "stage/$name/rustify" "stage/$name/${{ matrix.ytdlp_name }}"
+          chmod +x "stage/$name/rustify.bin" "stage/$name/${{ matrix.ytdlp_name }}"
+
           if [ "${{ runner.os }}" = "Linux" ]; then
+            # Bundle libmpv and most non-glibc shared libs for portability.
+            cat > /tmp/bundle_libs.py << 'PY'
+          import os, re, shutil, subprocess, sys
+          exe, libdir = sys.argv[1], sys.argv[2]
+          exclude = re.compile(r'linux-vdso|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libgcc_s\.so|libstdc\+\+\.so')
+          seen = set()
+          queue = [exe]
+          while queue:
+              cur = queue.pop()
+              try:
+                  out = subprocess.check_output(["ldd", cur], text=True, errors="ignore")
+              except Exception:
+                  continue
+              for line in out.splitlines():
+                  m = re.search(r'=>\s*(/[^\s]+)', line)
+                  if not m:
+                      continue
+                  path = m.group(1)
+                  base = os.path.basename(path)
+                  if exclude.search(base):
+                      continue
+                  if not os.path.isfile(path) or path in seen:
+                      continue
+                  seen.add(path)
+                  shutil.copy2(path, os.path.join(libdir, base))
+                  queue.append(path)
+          print(f"Bundled {len(seen)} libs")
+          PY
+            python3 /tmp/bundle_libs.py "stage/$name/rustify.bin" "stage/$name/lib"
+            cat > "stage/$name/rustify" << 'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$DIR/rustify.bin" "$@"
+          SH
+            chmod +x "stage/$name/rustify"
             cp scripts/install.sh "stage/$name/install.sh"
             chmod +x "stage/$name/install.sh"
             cp -r packaging "stage/$name/packaging"
+          else
+            mv "stage/$name/rustify.bin" "stage/$name/rustify"
           fi
+
           mkdir -p dist
           tar -czf "dist/${{ matrix.asset }}" -C stage "$name"
 
@@ -113,6 +155,39 @@ jobs:
           mkdir -p "stage/$name" dist
           cp "target/${{ matrix.target }}/release/rustify.exe" "stage/$name/"
           curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
+          # Bundle required MSYS2/UCRT64 DLLs so users don't need to install mpv.
+          cat > /tmp/bundle_dlls.py << 'PY'
+          import os, re, shutil, subprocess, sys
+          exe, out = sys.argv[1], sys.argv[2]
+          seen = set()
+          try:
+              text = subprocess.check_output(["ntldd", "-R", exe], text=True, errors="ignore")
+          except Exception as e:
+              print(e, file=sys.stderr)
+              text = ""
+          for line in text.splitlines():
+              m = re.search(r'=>\s*([^\(]+)', line)
+              if not m:
+                  continue
+              path = m.group(1).strip().strip('"').replace("\\", "/")
+              if "ucrt64/bin/" not in path.lower():
+                  continue
+              if re.match(r'^/[a-zA-Z]/', path):
+                  path = path[1] + ":" + path[2:]
+              if os.path.isfile(path) and path.lower() not in seen:
+                  shutil.copy2(path, out)
+                  seen.add(path.lower())
+          for dll in ["libmpv-2.dll","libwinpthread-1.dll","libgcc_s_seh-1.dll","libstdc++-6.dll"]:
+              for root in ["/ucrt64/bin", "C:/msys64/ucrt64/bin"]:
+                  p = os.path.join(root, dll)
+                  if os.path.isfile(p) and p.lower() not in seen:
+                      shutil.copy2(p, out)
+                      seen.add(p.lower())
+                      break
+          print(f"Bundled {len(seen)} DLLs")
+          PY
+          python3 /tmp/bundle_dlls.py "target/${{ matrix.target }}/release/rustify.exe" "stage/$name" \
+            || python /tmp/bundle_dlls.py "target/${{ matrix.target }}/release/rustify.exe" "stage/$name"
           pwsh -Command "Compress-Archive -Path 'stage/$name/*' -DestinationPath 'dist/${{ matrix.asset }}'"
 
       - name: Upload artifact

@@ -41,13 +41,31 @@ mkdir -p \
     "$PREFIX/share/applications" \
     "$PREFIX/share/icons/hicolor/scalable/apps"
 
-install -m755 "$BINARY" "$PREFIX/bin/rustify"
+BINARY_DIR="$(cd "$(dirname "$BINARY")" && pwd)"
 
 # Install bundled yt-dlp if present next to binary.
-BINARY_DIR="$(cd "$(dirname "$BINARY")" && pwd)"
 if [[ -f "$BINARY_DIR/yt-dlp" ]]; then
     install -m755 "$BINARY_DIR/yt-dlp" "$PREFIX/bin/yt-dlp"
     echo "Installed bundled yt-dlp to $PREFIX/bin/yt-dlp"
+fi
+
+# If this is a packaged release with a wrapper + bundled libs, install them properly.
+if [[ -f "$BINARY_DIR/rustify.bin" ]]; then
+    install -m755 "$BINARY_DIR/rustify.bin" "$PREFIX/bin/rustify.bin"
+    if [[ -d "$BINARY_DIR/lib" ]]; then
+        mkdir -p "$PREFIX/lib/rustify"
+        cp -a "$BINARY_DIR/lib/." "$PREFIX/lib/rustify/"
+    fi
+    cat > "$PREFIX/bin/rustify" << 'WRAP'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="$DIR/../lib/rustify${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$DIR/rustify.bin" "$@"
+WRAP
+    chmod +x "$PREFIX/bin/rustify"
+else
+    install -m755 "$BINARY" "$PREFIX/bin/rustify"
 fi
 
 # Raster icons.

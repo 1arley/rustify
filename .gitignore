@@ -33,3 +33,6 @@ docs/research/assets/*
 
 # OS
 .DS_Store
+
+# Local Cargo config
+.cargo/

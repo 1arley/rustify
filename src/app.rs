@@ -20,7 +20,11 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::slider::{Slider, SliderState};
-use gpui_component::{Disableable, Root, button::ButtonVariants};
+use gpui_component::{
+    Disableable, Root,
+    button::ButtonVariants,
+    menu::{ContextMenuExt, PopupMenuItem},
+};
 
 fn playback_item(track: &Track) -> PlaybackItem {
     PlaybackItem {
@@ -2954,6 +2958,7 @@ impl Home {
     }
 
     fn sidebar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let home = cx.entity().downgrade();
         let playlist_rows: Vec<_> = self
             .playlists
             .iter()
@@ -2962,6 +2967,9 @@ impl Home {
                 let active = self.active_page == ActivePage::Playlist
                     && self.selected_playlist.as_deref() == Some(playlist.id.as_str());
                 let id = playlist.id.clone();
+                let can_delete = self.local_playlists.iter().any(|local| local.id == id);
+                let delete_id = id.clone();
+                let menu_home = home.clone();
                 let mark: String = if playlist.name.is_empty() {
                     "♫".to_owned()
                 } else {
@@ -3021,7 +3029,22 @@ impl Home {
                                     .truncate()
                                     .text_color(rgb(MUTED))
                                     .child(format!("{} faixas", playlist.tracks.len())),
-                            ),
+                            )
+                            .context_menu(move |menu, _, _| {
+                                if can_delete {
+                                    let id = delete_id.clone();
+                                    let home = menu_home.clone();
+                                    menu.item(PopupMenuItem::new("Excluir playlist").on_click(
+                                        move |_, _, cx| {
+                                            let _ = home.update(cx, |this, cx| {
+                                                this.remove_playlist(&id, cx);
+                                            });
+                                        },
+                                    ))
+                                } else {
+                                    menu
+                                }
+                            })
                     )
             })
             .collect();

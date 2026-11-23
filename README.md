@@ -45,7 +45,7 @@ The app uses the operating system's user config and local data directories throu
 
 ## Responsive layout
 
-At 1100 px and wider the app shows the library sidebar, content, Now Playing panel, and full player controls together. Below 1100 px the Now Playing panel collapses and the player becomes compact; below 900 px the sidebar narrows; at 620 px and below navigation moves to the bottom. The 1100 px layout has been visually checked; the other planned sizes still need review.
+At 1040 px and wider the app shows the library sidebar, content, Now Playing panel, and full player controls together. Below 1040 px the Now Playing panel collapses and the player becomes compact; below 900 px the sidebar narrows; at 620 px and below navigation moves to the bottom. The 1040 px breakpoint still needs visual review, as do the other planned sizes.
 
 ## Code layout
 

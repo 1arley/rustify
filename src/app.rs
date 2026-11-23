@@ -6,7 +6,7 @@ use crate::components::{Assets, Http, artwork, header, icon_heart, status_card, 
 use crate::design::{
     ACCENT, BLACK, CARD, CARD_HOVER, ERROR, INFO, MUTED, PRIMARY, SURFACE, cover_color,
 };
-use crate::home::playback_summary;
+use crate::home::playback_status;
 use crate::library::{self, SavedPlaylist, SpotifySnapshot};
 use crate::playback::{self, PlaybackCommand, PlaybackItem, PlaybackState, QueueCommand};
 use crate::spotify;
@@ -964,7 +964,7 @@ impl Home {
                     };
                     div()
                         .id(("home-playlist-card", index))
-                        .w(px(230.0))
+                        .w(px(160.0))
                         .rounded_md()
                         .bg(rgb(CARD))
                         .border_1()
@@ -1065,8 +1065,68 @@ impl Home {
                     .into_any_element()
             };
 
+        let tracks_for_play: std::rc::Rc<[Track]> = self.liked_tracks.clone().into();
+        let liked_tracks = if self.liked_tracks.is_empty() {
+            status_card(
+                "Nenhuma música curtida ainda",
+                "Busque uma faixa e use o coração para salvá-la aqui.",
+                "info",
+            )
+            .into_any_element()
+        } else {
+            let cards = self.liked_tracks.iter().enumerate().map(|(index, track)| {
+                let tracks = tracks_for_play.clone();
+                let mark: String = track.name.chars().take(2).collect();
+                let artwork_url = track.artwork_url();
+                Button::new(("home-liked-track", index))
+                    .ghost()
+                    .w(px(132.0))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap_2()
+                    .p_2()
+                    .rounded_md()
+                    .bg(rgb(CARD))
+                    .child(artwork(
+                        &mark,
+                        cover_color(&track.name),
+                        112.0,
+                        artwork_url.as_deref(),
+                    ))
+                    .child(
+                        div()
+                            .w_full()
+                            .text_sm()
+                            .truncate()
+                            .child(track.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .truncate()
+                            .child(track.artist_names().to_owned()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.play_track(&tracks, index, cx);
+                    }))
+            });
+            div()
+                .w_full()
+                .id("home-liked-tracks")
+                .overflow_scroll()
+                .flex()
+                .flex_nowrap()
+                .gap_2()
+                .children(cards)
+                .into_any_element()
+        };
+
         div()
-            .p_6()
+            .p_4()
             .flex()
             .flex_col()
             .gap_4()
@@ -1076,7 +1136,6 @@ impl Home {
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("Início"),
             )
-            .child(playback_summary(&self.playback))
             .child(playlists_section)
             .child(
                 div()
@@ -1085,7 +1144,7 @@ impl Home {
                     .text_color(rgb(MUTED))
                     .child("Músicas curtidas"),
             )
-            .child(self.track_rows(&self.liked_tracks, cx))
+            .child(liked_tracks)
             .child(self.message_card())
             .into_any_element()
     }
@@ -1114,7 +1173,7 @@ impl Home {
             .flex()
             .justify_center()
             .px_6()
-            .py_8()
+            .py_4()
             .child(
                 div()
                     .w_full()
@@ -1122,7 +1181,6 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .child(playback_summary(&self.playback))
                     .child(
                         div()
                             .text_xs()
@@ -1240,7 +1298,7 @@ impl Home {
             .flex()
             .justify_center()
             .px_6()
-            .py_8()
+            .py_4()
             .child(
                 div()
                     .w_full()
@@ -1248,7 +1306,6 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .child(playback_summary(&self.playback))
                     .child(
                         div()
                             .text_2xl()
@@ -1306,8 +1363,13 @@ impl Home {
     }
 
     fn now_playing_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (status_label, status_color) = playback_status(&self.playback);
         let title = if self.playback.title.is_empty() {
-            "Nada tocando"
+            if self.playback.connected {
+                "Nada tocando"
+            } else {
+                "Player de áudio indisponível"
+            }
         } else {
             &self.playback.title
         };
@@ -1319,10 +1381,12 @@ impl Home {
         let mark: String = title.chars().take(2).collect();
         div()
             .w_full()
+            .h_full()
             .flex()
+            .items_center()
             .justify_center()
             .px_4()
-            .py_6()
+            .py_4()
             .child(
                 div()
                     .w_full()
@@ -1331,11 +1395,10 @@ impl Home {
                     .flex_col()
                     .items_center()
                     .gap_5()
-                    .child(playback_summary(&self.playback))
                     .child(artwork(
                         &mark,
                         cover_color(title),
-                        220.0,
+                        320.0,
                         self.playback.artwork_url.as_deref(),
                     ))
                     .child(
@@ -1345,6 +1408,13 @@ impl Home {
                             .flex_col()
                             .items_center()
                             .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(status_color))
+                                    .child(status_label),
+                            )
                             .child(
                                 div()
                                     .text_xl()
@@ -1385,15 +1455,15 @@ impl Home {
                             .child(
                                 Button::new("now-playing-play-pause")
                                     .primary()
-                                    .bg(rgb(PRIMARY))
-                                    .text_color(rgb(0xffffff))
+                                    .bg(rgb(0xffffff))
+                                    .text_color(rgb(BLACK))
                                     .child(svg_icon(
                                         if self.playback.playing {
                                             "icons/pause.svg"
                                         } else {
                                             "icons/play.svg"
                                         },
-                                        0xffffff,
+                                        BLACK,
                                         18.0,
                                     ))
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1557,7 +1627,7 @@ impl Home {
             .flex()
             .justify_center()
             .px_6()
-            .py_8()
+            .py_4()
             .child(
                 div()
                     .w_full()
@@ -1565,7 +1635,6 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .child(playback_summary(&self.playback))
                     .child(
                         div()
                             .rounded_md()
@@ -1670,7 +1739,7 @@ impl Home {
             .flex()
             .justify_center()
             .px_6()
-            .py_8()
+            .py_4()
             .child(
                 div()
                     .w_full()
@@ -1678,7 +1747,6 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .child(playback_summary(&self.playback))
                     .child(
                         div()
                             .text_xs()
@@ -2215,7 +2283,7 @@ impl Home {
             .flex()
             .justify_center()
             .px_6()
-            .py_8()
+            .py_4()
             .child(
                 div()
                     .w_full()
@@ -2223,7 +2291,6 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .child(playback_summary(&self.playback))
                     .child(
                         div()
                             .text_2xl()
@@ -3004,8 +3071,8 @@ impl Home {
         controls = controls.child(
             Button::new("compact-play-pause")
                 .primary()
-                .bg(rgb(PRIMARY))
-                .text_color(rgb(0xffffff))
+                .bg(rgb(0xffffff))
+                .text_color(rgb(BLACK))
                 .compact()
                 .child(svg_icon(
                     if self.playback.playing {
@@ -3013,7 +3080,7 @@ impl Home {
                     } else {
                         "icons/play.svg"
                     },
-                    0xffffff,
+                    BLACK,
                     16.0,
                 ))
                 .on_click(
@@ -3183,19 +3250,13 @@ impl Home {
                                         )
                                         .into_any_element()
                                     } else {
-                                        div()
-                                            .id("play-pause")
+                                        Button::new("play-pause")
+                                            .primary()
                                             .size(px(32.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
                                             .rounded_full()
-                                            .cursor_pointer()
-                                            .bg(rgb(if self.playback.playing {
-                                                ACCENT
-                                            } else {
-                                                PRIMARY
-                                            }))
+                                            .p_0()
+                                            .bg(rgb(0xffffff))
+                                            .text_color(rgb(BLACK))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.run_command(PlaybackCommand::PlayPause, cx)
                                             }))
@@ -3205,11 +3266,7 @@ impl Home {
                                                 } else {
                                                     "icons/play.svg"
                                                 },
-                                                if self.playback.playing {
-                                                    BLACK
-                                                } else {
-                                                    0xffffff
-                                                },
+                                                BLACK,
                                                 16.0,
                                             ))
                                             .into_any_element()
@@ -3300,9 +3357,9 @@ impl Home {
         active: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(id)
-            .cursor_pointer()
+        Button::new(id)
+            .ghost()
+            .compact()
             .text_color(rgb(if active { ACCENT } else { MUTED }))
             .on_click(cx.listener(move |this, _, _, cx| this.run_command(command, cx)))
             .child(label)
@@ -3317,9 +3374,17 @@ impl Home {
         size: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(id)
-            .cursor_pointer()
+        let tooltip = match id {
+            "shuffle" | "now-playing-shuffle" => "Modo aleatório",
+            "previous" | "compact-prev" | "now-playing-prev" => "Faixa anterior",
+            "next" | "compact-next" | "now-playing-next" => "Próxima faixa",
+            "repeat" | "now-playing-repeat" => "Repetir faixa",
+            _ => "Controle de reprodução",
+        };
+        Button::new(id)
+            .ghost()
+            .compact()
+            .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| this.run_command(command, cx)))
             .child(svg_icon(
                 icon_path,
@@ -3346,8 +3411,8 @@ impl Render for Home {
         let width = window.bounds().size.width;
         let mobile = width <= px(620.0);
         let compact_navigation = width <= px(900.0);
-        let compact_player = width < px(1100.0);
-        let show_now_playing = width >= px(1100.0);
+        let compact_player = width < px(1040.0);
+        let show_now_playing = width >= px(1040.0);
 
         for (slider, value) in [(&self.seek, progress), (&self.volume, volume)] {
             slider.update(cx, |slider, cx| {
@@ -3377,7 +3442,6 @@ impl Render for Home {
             .text_color(rgb(0xffffff))
             .child(header(
                 &self.search_input,
-                self.playback.connected,
                 mobile,
                 cx.listener(|this, _, _, cx| {
                     this.active_page = ActivePage::Home;
@@ -3410,8 +3474,8 @@ pub(crate) fn run() {
                 theme.background = rgb(BLACK).into();
                 theme.foreground = rgb(0xffffff).into();
                 theme.muted_foreground = rgb(MUTED).into();
-                theme.primary = rgb(PRIMARY).into();
-                theme.primary_foreground = rgb(0xffffff).into();
+                theme.primary = rgb(0xffffff).into();
+                theme.primary_foreground = rgb(BLACK).into();
                 theme.secondary = rgb(CARD).into();
                 theme.secondary_hover = rgb(CARD_HOVER).into();
                 theme.secondary_foreground = rgb(0xffffff).into();
@@ -3419,8 +3483,8 @@ pub(crate) fn run() {
                 theme.accent_foreground = rgb(0xffffff).into();
                 theme.border = rgb(CARD_HOVER).into();
                 theme.input = rgb(CARD).into();
-                theme.caret = rgb(PRIMARY).into();
-                theme.slider_bar = rgb(PRIMARY).into();
+                theme.caret = rgb(0xffffff).into();
+                theme.slider_bar = rgb(0xffffff).into();
                 theme.slider_thumb = rgb(0xffffff).into();
             }
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);

@@ -11,13 +11,96 @@ use gpui::http_client::{
     AsyncBody, HttpClient, Request, Response, Result as HttpResult, Url, anyhow,
 };
 use gpui::{
-    AnyElement, App, AssetSource, ClickEvent, Entity, ImageSource, ObjectFit, SharedString,
-    SharedUri, Svg, Window, div, img, prelude::*, px, rgb, svg,
+    Animation, AnimationExt, AnyElement, App, AssetSource, ClickEvent, Entity, ImageSource,
+    ObjectFit, SharedString, SharedUri, Svg, Window, bounce, div, img, linear, prelude::*, px, rgb,
+    svg,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState},
 };
+
+pub(crate) fn action_button(id: impl Into<gpui::ElementId>) -> Button {
+    action_button_when(id, true)
+}
+
+pub(crate) fn action_button_when(id: impl Into<gpui::ElementId>, enabled: bool) -> Button {
+    let button = Button::new(id);
+    if enabled {
+        button.cursor_pointer()
+    } else {
+        button
+    }
+}
+
+pub(crate) struct MarqueeText {
+    title: String,
+    id: gpui::ElementId,
+}
+
+impl MarqueeText {
+    pub(crate) fn new(title: impl Into<String>, id: impl Into<gpui::ElementId>) -> Self {
+        Self {
+            title: title.into(),
+            id: id.into(),
+        }
+    }
+
+    pub(crate) fn render(self) -> AnyElement {
+        div()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                div().with_animation(
+                    self.id,
+                    Animation::new(Duration::from_secs(10))
+                        .repeat()
+                        .with_easing(bounce(linear)),
+                    move |container, progress| {
+                        let title = self.title.clone();
+                        container.child(
+                            gpui::canvas(
+                                move |_, window, _| {
+                                    let style = window.text_style();
+                                    let run = gpui::TextRun {
+                                        len: title.len(),
+                                        font: style.font(),
+                                        color: style.color,
+                                        background_color: style.background_color,
+                                        underline: style.underline,
+                                        strikethrough: style.strikethrough,
+                                    };
+                                    let line = window.text_system().shape_line(
+                                        title.into(),
+                                        style.font_size.to_pixels(window.rem_size()),
+                                        &[run],
+                                        None,
+                                    );
+                                    (line, style.line_height_in_pixels(window.rem_size()))
+                                },
+                                move |bounds, (line, line_height), window, cx| {
+                                    let distance = (line.width - bounds.size.width).max(px(0.0));
+                                    let offset = distance * progress;
+                                    window.with_content_mask(
+                                        Some(gpui::ContentMask { bounds }),
+                                        |window| {
+                                            let origin =
+                                                gpui::point(bounds.left() - offset, bounds.top());
+                                            let _ = line.paint(origin, line_height, window, cx);
+                                        },
+                                    );
+                                },
+                            )
+                            .w_full()
+                            .h(gpui::rems(1.5)),
+                        )
+                    },
+                ),
+            )
+            .into_any_element()
+    }
+}
 
 const ICON_PATHS: &[&str] = &[
     "icons/home.svg",
@@ -171,7 +254,7 @@ pub(crate) fn header(
         .child(svg_icon("icons/search.svg", PRIMARY, 16.0))
         .child(Input::new(search).appearance(false).w_full())
         .child(
-            Button::new("search-submit")
+            action_button("search-submit")
                 .ghost()
                 .compact()
                 .tooltip("Pesquisar")
@@ -192,7 +275,7 @@ pub(crate) fn header(
     if !compact {
         header = header.child(div().flex_1());
         header = header.child(
-            Button::new("home")
+            action_button("home")
                 .ghost()
                 .tooltip("Início")
                 .child(svg_icon("icons/home.svg", 0xffffff, 18.0))

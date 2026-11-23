@@ -5,59 +5,146 @@
   </picture>
 </p>
 
-# Rustify
+<p align="center">
+  Player de música desktop nativo em Rust com GPUI e libmpv.<br>
+  Pesquise, ouça e organize músicas, com ou sem conta Spotify.
+</p>
 
-[English](README.md) | [Português (Brasil)](README.pt-BR.md)
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.pt-BR.md">Português (Brasil)</a>
+</p>
 
-Player de música desktop em Rust com GPUI e libmpv. Pesquise faixas no Audius ou no YouTube e ouça pelo player integrado; importe também playlists e biblioteca do Spotify.
+<!-- Adicione uma captura ou GIF curto aqui, por exemplo:
+<p align="center"><img src="public/screenshot.png" alt="Janela principal do Rustify" width="800"></p>
+-->
 
-## Funcionalidades
+## Por que o Rustify
 
-- Busca no Audius e no YouTube sem conectar uma conta Spotify.
-- Player integrado com fila e controles de play/pause, avanço na faixa, volume, shuffle e repetição.
-- Criação de playlists locais, adição de faixas pela busca e importação de playlists do YouTube só com metadados.
-- Curtidas guardam apenas metadados; o áudio começa a tocar enquanto o player recebe o stream.
-- Restauração da última faixa e posição ao abrir, mantendo a reprodução pausada.
-- Importação de links e URIs públicos do Spotify, arquivos JSON/CSV ou sincronização opcional de conta Spotify com OAuth PKCE.
-- Snapshot da conta separado da biblioteca local, com ação explícita para limpar imports antigos identificáveis.
-- Layout responsivo com navegação compacta e mini-player em janelas estreitas.
+- **Sem conta obrigatória.** Pesquise no Audius e no YouTube e comece a ouvir na hora.
+- **Traga sua biblioteca.** Importe a partir de links do Spotify, exportações de dados ou sincronização opcional de conta.
+- **Nativo e leve.** App em Rust com GPUI na interface e libmpv na reprodução, sem web view.
+- **Local-first.** Playlists e faixas curtidas ficam na sua máquina e armazenam apenas metadados.
 
 > [!NOTE]
 > O Rustify não reproduz streams do Spotify. Ele usa os metadados do Spotify para importar a biblioteca e procura correspondências no YouTube para reproduzir essas faixas. A disponibilidade depende de catálogos e serviços externos.
 
+## Conteúdo
+
+- [Funcionalidades](#funcionalidades)
+- [Início rápido](#início-rápido)
+- [Requisitos](#requisitos)
+- [Estado das plataformas](#estado-das-plataformas)
+- [Importando sua música](#importando-sua-música)
+- [Layout responsivo](#layout-responsivo)
+- [Dados locais e privacidade](#dados-locais-e-privacidade)
+- [Estrutura do código](#estrutura-do-código)
+
+## Funcionalidades
+
+**Ouvir**
+
+- Busca no Audius e no YouTube sem conectar uma conta Spotify.
+- Player integrado com fila e controles de play/pause, avanço na faixa, volume, shuffle e repetição.
+- Restaura a última faixa e posição ao abrir, mantendo a reprodução pausada para você escolher quando tocar.
+
+**Organizar**
+
+- Criação de playlists locais e adição de faixas direto dos resultados da busca.
+- Importação de playlists do YouTube só com metadados, sem baixar áudio.
+- Curtidas guardam apenas metadados; o áudio começa a tocar quando a reprodução inicia.
+
+**Importar**
+
+- Links e URIs públicos do Spotify, exportações JSON/CSV ou sincronização opcional de conta via OAuth PKCE.
+- Snapshot da conta separado da biblioteca local, com ação explícita para limpar imports antigos identificáveis.
+
+**Interface**
+
+- Layout responsivo com navegação compacta e mini-player em janelas estreitas.
+
+## Início rápido
+
+1. Instale os [requisitos](#requisitos) do seu sistema (`libmpv` e `yt-dlp`).
+2. Clone o repositório e execute:
+
+   ```sh
+   cargo run
+   ```
+
+3. Pesquise uma faixa ou abra **Biblioteca → Importar** para trazer sua música.
+
 ## Requisitos
 
-- Rust estável com suporte à edition 2024.
-- `libmpv` e codecs de áudio instalados no sistema.
-- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) no `PATH` para busca, importação de playlists do YouTube e correspondência de faixas importadas do Spotify.
-- Acesso à internet para consultar os catálogos e reproduzir streams.
+| Requisito | Por que é necessário |
+| --- | --- |
+| Rust estável com suporte à edition 2024 | Compilar o app |
+| `libmpv` e codecs de áudio | Reprodução |
+| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) no `PATH` | Busca, importação de playlists do YouTube e correspondência de faixas importadas do Spotify |
+| Acesso à internet | Consultar catálogos e reproduzir streams |
+
+Para compilar localmente você também precisa dos **arquivos de desenvolvimento** do `libmpv` para o seu sistema:
+
+| Sistema | Configuração |
+| --- | --- |
+| Linux | Instale o pacote de desenvolvimento `libmpv` da sua distribuição. |
+| macOS | Instale `mpv` com o Homebrew. |
+| Windows | O caminho de CI usa o target Rust `x86_64-pc-windows-gnu` com pacotes MSYS2 UCRT64. |
+
+No Linux, a seleção de arquivos usa o portal de desktop XDG e recorre ao `zenity` se o portal não abrir o diálogo.
 
 ## Estado das plataformas
 
-Linux x86_64 é a única plataforma exercitada localmente até agora. Há jobs nativos de CI configurados para Linux x86_64, Windows x86_64 e macOS arm64, mas a primeira execução deles e os testes interativos de áudio ainda estão pendentes. Os builds exigem `libmpv` nativo; o formato de distribuição e o empacotamento de codecs ainda não foram definidos.
+| Plataforma | Status |
+| --- | --- |
+| Linux x86_64 | Exercitado localmente |
+| Windows x86_64 | Job nativo de CI configurado; primeira execução e teste interativo de áudio pendentes |
+| macOS arm64 | Job nativo de CI configurado; primeira execução e teste interativo de áudio pendentes |
 
-Para compilar localmente, instale `libmpv` e seus arquivos de desenvolvimento para o sistema. O caminho de CI do Windows usa o target Rust `x86_64-pc-windows-gnu` com pacotes MSYS2 UCRT64. No macOS, o Homebrew fornece `mpv`; no Linux, use o pacote de desenvolvimento `libmpv` da distribuição. A seleção de arquivos no Linux usa o portal de desktop XDG e recorre ao `zenity` se o portal não abrir o diálogo.
+Os builds exigem `libmpv` nativo. O formato de distribuição e o empacotamento de codecs ainda não foram definidos.
 
-## Executar
+## Importando sua música
 
-```sh
-cargo run
-```
+Abra a tela de importação a partir da biblioteca. Você pode:
 
-Na tela de importação, cole o link de uma playlist do YouTube para salvar até 500 faixas sem baixar áudio. Você também pode colar um link ou URI público do Spotify, selecionar arquivos exportados ou informar um Client ID do Spotify Developer Dashboard para sincronizar uma conta. São aceitos `Playlist1.json`, `YourLibrary.json`, `StreamingHistory*.json`, pastas Spotify Account Data/MyData e CSVs do Exportify. A sincronização é opcional.
+- Colar o **link de uma playlist do YouTube** para salvar seus metadados sem baixar áudio.
+- Colar um **link ou URI público do Spotify**.
+- Escolher **arquivos exportados** do seu computador.
+- Informar um **Client ID do Spotify Developer Dashboard** para sincronizar uma conta (opcional).
 
-## Dados locais
+Exportações suportadas:
 
-O app usa as pastas de configuração e dados locais do sistema operacional por meio de `dirs`. No Linux, respeita `XDG_CONFIG_HOME` e `XDG_DATA_HOME`; Windows e macOS usam as pastas padrão do usuário. Consulte [PRIVACY.md](PRIVACY.md) para nomes dos arquivos, retenção, sincronização e remoção.
+| Origem | Arquivos |
+| --- | --- |
+| Exportação de dados do Spotify | `Playlist1.json`, `YourLibrary.json`, `StreamingHistory*.json` ou a pasta Account Data / MyData |
+| Exportify | Arquivos CSV |
 
 ## Layout responsivo
 
-A navegação principal reúne Início, Buscar e Biblioteca. A importação fica na biblioteca; fila e Tocando agora ficam acessíveis pelo player. Em janelas de 1280 px ou mais, o painel Tocando agora pode ser exibido ou recolhido. Os controles completos do player aparecem a partir de 1040 px; abaixo disso o player fica compacto. Em 900 px ou menos a navegação lateral fica compacta; em 620 px ou menos a navegação vai para a parte inferior. O layout foi conferido visualmente em 1440×900, 1280×800, 768×1024 e 390×844 com dados de demonstração.
+A navegação principal reúne **Início**, **Buscar** e **Biblioteca**. A importação fica na biblioteca; fila e Tocando agora ficam acessíveis pelo player.
+
+| Largura da janela | Comportamento |
+| --- | --- |
+| 1280 px ou mais | Painel Tocando agora pode ser exibido ou recolhido |
+| 1040 px ou mais | Controles completos do player |
+| Abaixo de 1040 px | Player compacto |
+| 900 px ou menos | Navegação lateral compacta |
+| 620 px ou menos | Navegação vai para a parte inferior |
+
+O layout foi conferido visualmente em 1440×900, 1280×800, 768×1024 e 390×844 com dados de demonstração.
+
+## Dados locais e privacidade
+
+O Rustify armazena seus dados nas pastas de configuração e dados locais do sistema operacional, resolvidas por meio de `dirs`. No Linux, respeita `XDG_CONFIG_HOME` e `XDG_DATA_HOME`; Windows e macOS usam as pastas padrão do usuário.
+
+Consulte [PRIVACY.md](PRIVACY.md) para nomes dos arquivos, retenção, sincronização e remoção.
 
 ## Estrutura do código
 
-- `src/app.rs`: janela, navegação e telas da aplicação.
-- `src/catalog.rs`: busca Audius/YouTube e resolução de faixas importadas.
-- `src/playback.rs` e `src/queue.rs`: reprodução via libmpv e fila.
-- `src/library.rs`: persistência local da biblioteca.
-- `src/spotify/`: integração de conta, API e importação de dados do Spotify.
+| Caminho | Responsabilidade |
+| --- | --- |
+| `src/app.rs` | Janela, navegação e telas da aplicação |
+| `src/catalog.rs` | Busca Audius/YouTube e resolução de faixas importadas |
+| `src/playback.rs`, `src/queue.rs` | Reprodução via libmpv e fila |
+| `src/library.rs` | Persistência local da biblioteca |
+| `src/spotify/` | Integração de conta, API e importação de dados do Spotify |

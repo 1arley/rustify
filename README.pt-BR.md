@@ -45,7 +45,7 @@ O app usa as pastas de configuração e dados locais do sistema operacional por 
 
 ## Layout responsivo
 
-Em janelas de 1040 px ou mais, biblioteca, conteúdo, painel Now Playing e controles completos aparecem juntos. Abaixo de 1040 px, o painel recolhe e o player fica compacto; abaixo de 900 px, a navegação lateral fica compacta; em 620 px ou menos, a navegação vai para a parte inferior. O breakpoint de 1040 px ainda precisa de revisão visual; os outros tamanhos planejados também.
+A navegação principal reúne Início, Buscar e Biblioteca. A importação fica na biblioteca; fila e Tocando agora ficam acessíveis pelo player. Em janelas de 1280 px ou mais, o painel Tocando agora pode ser exibido ou recolhido. Os controles completos do player aparecem a partir de 1040 px; abaixo disso o player fica compacto. Em 900 px ou menos a navegação lateral fica compacta; em 620 px ou menos a navegação vai para a parte inferior. O layout foi conferido visualmente em 1440×900, 1280×800, 768×1024 e 390×844 com dados de demonstração.
 
 ## Estrutura do código
 

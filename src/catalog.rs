@@ -466,18 +466,8 @@ impl Track {
 
     /// Retorna `true` se duas faixas representam a mesma música por ID, permalink ou vínculo resolvido.
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
-        if self.id == other.id || (!self.permalink.is_empty() && self.permalink == other.permalink)
-        {
-            return true;
-        }
-        match (&self.id, &other.id) {
-            (TrackId::Spotify(sp_key), TrackId::Youtube(yt_id))
-            | (TrackId::Youtube(yt_id), TrackId::Spotify(sp_key)) => {
-                crate::library::lookup_resolved_youtube_id(sp_key).as_deref()
-                    == Some(yt_id.as_str())
-            }
-            _ => false,
-        }
+        (!self.permalink.is_empty() && self.permalink == other.permalink)
+            || self.id.same_identity(&other.id)
     }
 
     /// Retorna a URL da capa da faixa (Audius, Spotify ou miniatura padrão do YouTube).
@@ -1336,6 +1326,27 @@ impl From<TrackId> for String {
     }
 }
 impl TrackId {
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.same_identity_with(other, crate::library::lookup_resolved_youtube_id)
+    }
+
+    fn same_identity_with(
+        &self,
+        other: &Self,
+        resolve: impl FnOnce(&str) -> Option<String>,
+    ) -> bool {
+        if self == other {
+            return true;
+        }
+        match (self, other) {
+            (Self::Spotify(sp_key), Self::Youtube(yt_id))
+            | (Self::Youtube(yt_id), Self::Spotify(sp_key)) => {
+                resolve(sp_key).as_deref() == Some(yt_id.as_str())
+            }
+            _ => false,
+        }
+    }
+
     pub fn stream_url(&self) -> String {
         match self {
             Self::Youtube(id) => format!("https://www.youtube.com/watch?v={id}"),
@@ -1354,6 +1365,26 @@ impl TrackId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spotify_identity_survives_youtube_playback_resolution() {
+        let spotify = TrackId::Spotify("source-key".into());
+        let youtube = TrackId::Youtube("abcdefghijk".into());
+        let resolve = |key: &str| {
+            assert_eq!(key, "source-key");
+            Some("abcdefghijk".to_owned())
+        };
+        assert!(spotify.same_identity_with(&spotify, |_| panic!("ID already matches")));
+        assert!(spotify.same_identity_with(&youtube, resolve));
+        assert!(youtube.same_identity_with(&spotify, resolve));
+        assert!(!spotify.same_identity_with(&youtube, |_| None));
+        assert!(!spotify.same_identity_with(&TrackId::Youtube("other-id123".into()), resolve,));
+        assert!(
+            !youtube.same_identity_with(&TrackId::Audius("abcdefghijk".into()), |_| panic!(
+                "Different catalogs"
+            ),)
+        );
+    }
+
     #[test]
     fn legacy_likes_keep_their_source_after_reopening() {
         let raw = r#"[{"id":"abc","title":"Mesmo título"},{"id":"yt:abcdefghijk","title":"Mesmo título"}]"#;

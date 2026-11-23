@@ -45,7 +45,7 @@ The app uses the operating system's user config and local data directories throu
 
 ## Responsive layout
 
-At 1040 px and wider the app shows the library sidebar, content, Now Playing panel, and full player controls together. Below 1040 px the Now Playing panel collapses and the player becomes compact; below 900 px the sidebar narrows; at 620 px and below navigation moves to the bottom. The 1040 px breakpoint still needs visual review, as do the other planned sizes.
+The main navigation is Home, Search, and Library. Import is available in the library; queue and Now Playing are available from the player. At 1280 px and wider, the Now Playing side panel can be shown or hidden. Full player controls appear at 1040 px and wider; below that the player becomes compact. At 900 px and below the sidebar narrows; at 620 px and below navigation moves to the bottom. The layout was visually checked at 1440×900, 1280×800, 768×1024, and 390×844 with demo data.
 
 ## Code layout
 

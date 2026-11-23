@@ -86,6 +86,7 @@ struct Home {
     _file_subscription: Subscription,
     results: Vec<Track>,
     active_page: ActivePage,
+    show_details: bool,
     liked_tracks: Vec<Track>,
     playlists: Vec<SavedPlaylist>,
     local_liked_tracks: Vec<Track>,
@@ -205,6 +206,7 @@ impl Home {
             _file_subscription,
             results: Vec::new(),
             active_page: ActivePage::Home,
+            show_details: true,
             liked_tracks,
             playlists,
             local_liked_tracks,
@@ -1110,6 +1112,7 @@ impl Home {
         };
         div()
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .id("home-content")
             .overflow_scroll()
@@ -1356,14 +1359,77 @@ impl Home {
                 div()
                     .text_2xl()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child("Início"),
+                    .child("Seu próximo play"),
+            )
+            .child(
+                div()
+                    .rounded_lg()
+                    .bg(rgb(0x182822))
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(ACCENT))
+                            .child("SEU ESPAÇO PARA OUVIR"),
+                    )
+                    .child(div().text_2xl().font_weight(gpui::FontWeight::BOLD).child(
+                        if self.playback.title.is_empty() {
+                            "Encontre a trilha do seu dia".to_owned()
+                        } else {
+                            self.playback.title.clone()
+                        },
+                    ))
+                    .child(div().text_sm().text_color(rgb(MUTED)).child(
+                        if self.playback.title.is_empty() {
+                            "Busque uma música ou traga suas playlists para começar.".to_owned()
+                        } else {
+                            format!("{} · Sua sessão continua aqui", self.playback.artist)
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                action_button("home-listen")
+                                    .primary()
+                                    .bg(rgb(ACCENT))
+                                    .text_color(rgb(BLACK))
+                                    .child(svg_icon("icons/play.svg", BLACK, 16.0))
+                                    .label(if self.playback.title.is_empty() {
+                                        "Encontrar músicas"
+                                    } else {
+                                        "Abrir minha sessão"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_page = if this.playback.title.is_empty() {
+                                            ActivePage::Search
+                                        } else {
+                                            ActivePage::NowPlaying
+                                        };
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                action_button("home-open-library")
+                                    .ghost()
+                                    .label("Minha biblioteca")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_page = ActivePage::Library;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
             )
             .child(playlists_section)
             .child(
                 div()
-                    .text_sm()
+                    .text_lg()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED))
                     .child("Músicas curtidas"),
             )
             .child(liked_tracks)
@@ -1382,7 +1448,7 @@ impl Home {
         } else if self.results.is_empty() && self.message.is_none() {
             status_card(
                 "Encontre sua próxima música",
-                "Pesquise faixas de artistas independentes e toque o áudio aqui no app.",
+                "Use a busca no topo para encontrar músicas no YouTube e no Audius. Não precisa de conta.",
                 "info",
             )
             .into_any_element()
@@ -1403,31 +1469,20 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap_5()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(INFO))
-                            .child("BUSCAR MÚSICAS"),
-                    )
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Busque e ouça música"),
-                    )
-                    .child(div().text_sm().text_color(rgb(MUTED)).child(
-                        "Busca e reprodução não exigem conta. As faixas abrem no player integrado.",
+                    .child(div().text_2xl().font_weight(gpui::FontWeight::BOLD).child(
+                        if self.results.is_empty() {
+                            "Descubra música"
+                        } else {
+                            "Resultados da busca"
+                        },
                     ))
-                    .child(
-                        action_button("search-catalogs")
-                            .primary()
-                            .bg(rgb(PRIMARY))
-                            .text_color(rgb(0xffffff))
-                            .child(svg_icon("icons/search.svg", 0xffffff, 14.0))
-                            .child("Buscar músicas")
-                            .on_click(cx.listener(|this, _, _, cx| this.search(cx))),
-                    )
+                    .child(div().text_sm().text_color(rgb(MUTED)).child(
+                        if self.results.is_empty() {
+                            "Sua próxima faixa começa na busca acima.".to_owned()
+                        } else {
+                            format!("{} músicas encontradas", self.results.len())
+                        },
+                    ))
                     .child(content)
                     .child(self.message_card()),
             )
@@ -1456,6 +1511,7 @@ impl Home {
                 action_button(("library-playlist", index))
                     .ghost()
                     .w_full()
+                    .h(px(64.0))
                     .flex()
                     .justify_start()
                     .items_center()
@@ -1538,7 +1594,7 @@ impl Home {
                         div()
                             .text_sm()
                             .text_color(rgb(MUTED))
-                            .child("Playlists e músicas curtidas salvas neste dispositivo."),
+                            .child("Todas as suas playlists e músicas salvas, em um só lugar."),
                     )
                     .child(
                         div()
@@ -1583,6 +1639,16 @@ impl Home {
                                         this.create_local_playlist(window, cx);
                                     })),
                             ),
+                    )
+                    .child(
+                        action_button("library-import")
+                            .ghost()
+                            .child(svg_icon("icons/import.svg", MUTED, 16.0))
+                            .label("Importar músicas e playlists")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_page = ActivePage::Import;
+                                cx.notify();
+                            })),
                     )
                     .child(playlists)
                     .child(
@@ -1790,6 +1856,18 @@ impl Home {
         let tracks_for_queue = playlist.tracks.clone();
         let playlist_id_remove = playlist.id.clone();
         let source_url = playlist.source_url.clone();
+        let is_local = self
+            .local_playlists
+            .iter()
+            .any(|local| local.id == playlist.id);
+        let origin = if !is_local {
+            "SINCRONIZADA"
+        } else if source_url.is_some() {
+            "IMPORTADA"
+        } else {
+            "SALVA NESTE DISPOSITIVO"
+        };
+        let duration = crate::home::playlist_duration(&playlist.tracks);
 
         let mut actions = div()
             .flex()
@@ -1799,10 +1877,10 @@ impl Home {
             .child(
                 action_button_when("playlist-play-all", !playlist.tracks.is_empty())
                     .primary()
-                    .bg(rgb(PRIMARY))
-                    .text_color(rgb(0xffffff))
+                    .bg(rgb(ACCENT))
+                    .text_color(rgb(BLACK))
                     .disabled(playlist.tracks.is_empty())
-                    .child(svg_icon("icons/play.svg", 0xffffff, 14.0))
+                    .child(svg_icon("icons/play.svg", BLACK, 14.0))
                     .child("Tocar playlist")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.play_track(&tracks_for_play, 0, cx);
@@ -1892,22 +1970,21 @@ impl Home {
                     .child(
                         div()
                             .rounded_md()
-                            .bg(rgb(CARD))
-                            .border_1()
-                            .border_color(rgb(CARD_HOVER))
+                            .bg(gpui::rgba((cover_color(&playlist.name) << 8) | 0x30))
                             .p_5()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_5()
                             .child(artwork(
                                 &mark,
                                 cover_color(&playlist.name),
-                                88.0,
+                                112.0,
                                 playlist.artwork_url.as_deref(),
                             ))
                             .child(
                                 div()
-                                    .min_w_0()
+                                    .min_w(px(140.0))
                                     .flex_1()
                                     .flex()
                                     .flex_col()
@@ -1917,31 +1994,30 @@ impl Home {
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(ACCENT))
-                                            .child("PLAYLIST"),
+                                            .child(origin),
                                     )
                                     .child(
-                                        div().text_2xl().font_weight(gpui::FontWeight::BOLD).child(
-                                            MarqueeText::new(
-                                                playlist.name.clone(),
-                                                "playlist-page-title",
-                                            )
-                                            .render(),
-                                        ),
+                                        div()
+                                            .text_2xl()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .child(playlist.name.clone()),
                                     )
-                                    .child(div().text_sm().text_color(rgb(MUTED)).truncate().child(
-                                        if playlist.description.trim().is_empty() {
-                                            format!("{} faixas", playlist.tracks.len())
-                                        } else {
-                                            format!(
-                                                "{} · {} faixas",
-                                                playlist.description,
-                                                playlist.tracks.len()
-                                            )
-                                        },
-                                    ))
-                                    .child(actions),
+                                    .when(!playlist.description.trim().is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(MUTED))
+                                                .child(playlist.description.clone()),
+                                        )
+                                    })
+                                    .child(div().text_sm().text_color(rgb(MUTED)).child(format!(
+                                        "{} faixas · {}",
+                                        playlist.tracks.len(),
+                                        duration
+                                    ))),
                             ),
                     )
+                    .child(actions)
                     .child(track_list)
                     .child(self.message_card()),
             )
@@ -2572,6 +2648,11 @@ impl Home {
         let queue: std::rc::Rc<[Track]> = tracks.into();
         let play_single_seed = self.active_page == ActivePage::Search;
         let rows = tracks.iter().cloned().enumerate().map(|(index, track)| {
+            let is_current = self
+                .playback
+                .current_index
+                .and_then(|index| self.playback.queue.get(index))
+                .is_some_and(|entry| entry.item.track_id.same_identity(&track.id));
             let is_liked = self
                 .local_liked_tracks
                 .iter()
@@ -2640,7 +2721,6 @@ impl Home {
                         .ghost()
                         .compact()
                         .child(svg_icon("icons/plus.svg", INFO, 14.0))
-                        .child("Adicionar")
                         .tooltip("Adicionar esta faixa a uma playlist")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.playlist_picker_track =
@@ -2682,15 +2762,16 @@ impl Home {
             let row = div()
                 .id(("track-row", index))
                 .w_full()
-                .h(px(66.0))
+                .h(px(60.0))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap_4()
-                .px_4()
+                .gap_2()
+                .px_2()
                 .rounded_md()
-                .bg(rgb(CARD))
+                .bg(rgb(if is_current { CARD } else { SURFACE }))
+                .hover(|style| style.bg(rgb(CARD_HOVER)))
                 .child(
                     div()
                         .min_w_0()
@@ -2698,7 +2779,7 @@ impl Home {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(artwork(&mark, cover_bg, 44.0, artwork_url.as_deref()))
+                        .child(artwork(&mark, cover_bg, 40.0, artwork_url.as_deref()))
                         .child(
                             div()
                                 .min_w_0()
@@ -2708,13 +2789,16 @@ impl Home {
                                 .gap_1()
                                 .overflow_hidden()
                                 .child(
-                                    div().text_sm().child(
-                                        MarqueeText::new(
-                                            track.name.clone(),
-                                            ("track-row-title", index),
-                                        )
-                                        .render(),
-                                    ),
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(if is_current { ACCENT } else { 0xffffff }))
+                                        .child(
+                                            MarqueeText::new(
+                                                track.name.clone(),
+                                                ("track-row-title", index),
+                                            )
+                                            .render(),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -2807,7 +2891,7 @@ impl Home {
                 .child(row)
                 .child(picker)
         });
-        div().flex().flex_col().gap_2().children(rows)
+        div().flex().flex_col().children(rows)
     }
 
     fn message_card(&self) -> AnyElement {
@@ -2886,6 +2970,7 @@ impl Home {
                 action_button(("sidebar-playlist", index))
                     .ghost()
                     .w_full()
+                    .h(px(60.0))
                     .flex()
                     .justify_start()
                     .items_center()
@@ -2980,17 +3065,10 @@ impl Home {
                 cx,
             ))
             .child(self.nav_item(
-                "nav-now-playing",
-                ActivePage::NowPlaying,
-                "icons/play.svg",
-                "Tocando agora".into(),
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-import",
-                ActivePage::Import,
-                "icons/import.svg",
-                "Importar playlists".into(),
+                "nav-liked-songs",
+                ActivePage::Library,
+                "icons/heart-fill.svg",
+                "Biblioteca".into(),
                 cx,
             ))
             .child(
@@ -3022,20 +3100,6 @@ impl Home {
                             })),
                     ),
             )
-            .child(self.nav_item(
-                "nav-liked-songs",
-                ActivePage::Library,
-                "icons/heart-fill.svg",
-                "Biblioteca".into(),
-                cx,
-            ))
-            .child(self.nav_item(
-                "nav-queue",
-                ActivePage::Queue,
-                "icons/queue.svg",
-                format!("Fila de reprodução ({})", self.playback.queue.len()),
-                cx,
-            ))
             .child(if compact {
                 div().flex_1().into_any_element()
             } else {
@@ -3122,20 +3186,6 @@ impl Home {
                 ActivePage::Library,
                 "icons/heart-fill.svg",
                 "Biblioteca",
-                cx,
-            ))
-            .child(self.mobile_nav_item(
-                "mobile-nav-queue",
-                ActivePage::Queue,
-                "icons/queue.svg",
-                "Fila",
-                cx,
-            ))
-            .child(self.mobile_nav_item(
-                "mobile-nav-import",
-                ActivePage::Import,
-                "icons/import.svg",
-                "Importar",
                 cx,
             ))
     }
@@ -3226,7 +3276,21 @@ impl Home {
                     .w_full()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Tocando agora"),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child("Tocando agora")
+                    .child(
+                        action_button("close-details")
+                            .ghost()
+                            .compact()
+                            .label("×")
+                            .tooltip("Recolher painel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_details = false;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(artwork(
                 &mark,
@@ -3307,6 +3371,47 @@ impl Home {
             )
     }
 
+    fn playback_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                action_button("player-queue")
+                    .ghost()
+                    .compact()
+                    .child(svg_icon(
+                        "icons/queue.svg",
+                        if self.active_page == ActivePage::Queue {
+                            ACCENT
+                        } else {
+                            MUTED
+                        },
+                        16.0,
+                    ))
+                    .tooltip("Abrir fila de reprodução")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.active_page = ActivePage::Queue;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                action_button("player-details")
+                    .ghost()
+                    .compact()
+                    .child(svg_icon("icons/play.svg", MUTED, 16.0))
+                    .tooltip("Tocando agora / alternar painel")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if window.bounds().size.width >= px(1280.0) {
+                            this.show_details = !this.show_details;
+                        } else {
+                            this.active_page = ActivePage::NowPlaying;
+                        }
+                        cx.notify();
+                    })),
+            )
+    }
+
     fn compact_player_bar(&self, mobile: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let title = if self.playback.title.is_empty() {
             "Nada tocando"
@@ -3319,49 +3424,57 @@ impl Home {
             &self.playback.artist
         };
         let mark: String = title.chars().take(2).collect();
-        let mut row = div()
-            .w_full()
-            .h(px(if mobile { 54.0 } else { 68.0 }))
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .child(artwork(
-                &mark,
-                cover_color(title),
-                if mobile { 38.0 } else { 48.0 },
-                self.playback.artwork_url.as_deref(),
-            ))
-            .child(
-                action_button("compact-player-details")
-                    .ghost()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap_1()
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.active_page = ActivePage::NowPlaying;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .w_full()
-                            .text_sm()
-                            .child(MarqueeText::new(title, "compact-player-title").render()),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .truncate()
-                            .child(artist.to_owned()),
-                    ),
-            );
+        let mut row =
+            div()
+                .w_full()
+                .h(px(if mobile { 54.0 } else { 68.0 }))
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .child(artwork(
+                    &mark,
+                    cover_color(title),
+                    if mobile { 38.0 } else { 48.0 },
+                    self.playback.artwork_url.as_deref(),
+                ))
+                .child(
+                    action_button("compact-player-details")
+                        .ghost()
+                        .h(px(if mobile { 48.0 } else { 56.0 }))
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_1()
+                        .overflow_hidden()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.active_page = ActivePage::NowPlaying;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .gap_1()
+                                .child(div().w_full().text_sm().child(
+                                    MarqueeText::new(title, "compact-player-title").render(),
+                                ))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .truncate()
+                                        .child(artist.to_owned()),
+                                ),
+                        ),
+                );
 
         let mut controls = div().flex().items_center().justify_center().gap_3();
         if !mobile {
@@ -3403,7 +3516,7 @@ impl Home {
                 cx,
             ));
         }
-        row = row.child(controls.flex_1());
+        row = row.child(controls).child(self.playback_navigation(cx));
         if !mobile {
             row = row
                 .child(
@@ -3616,13 +3729,14 @@ impl Home {
                     )
                     .child(
                         div()
-                            .w(px(200.0))
+                            .w(px(252.0))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_end()
                             .gap_2()
                             .text_color(rgb(MUTED))
+                            .child(self.playback_navigation(cx))
                             .child(svg_icon("icons/volume.svg", INFO, 16.0))
                             .child(self.control_button(
                                 "−",
@@ -3715,7 +3829,7 @@ impl Render for Home {
         let mobile = width <= px(620.0);
         let compact_navigation = width <= px(900.0);
         let compact_player = width < px(1040.0);
-        let show_now_playing = width >= px(1040.0);
+        let show_now_playing = width >= px(1280.0) && self.show_details;
 
         let seek_sync = (self.playback.position, self.playback.duration);
         if self.last_synced_seek != Some(seek_sync) {

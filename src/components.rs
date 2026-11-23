@@ -50,9 +50,17 @@ impl MarqueeText {
         div()
             .w_full()
             .min_w_0()
+            .relative()
             .overflow_hidden()
+            // Text supplies intrinsic dimensions; the canvas alone has none.
             .child(
-                div().with_animation(
+                div()
+                    .invisible()
+                    .whitespace_nowrap()
+                    .child(self.title.clone()),
+            )
+            .child(
+                div().absolute().inset_0().with_animation(
                     self.id,
                     Animation::new(Duration::from_secs(10))
                         .repeat()
@@ -92,8 +100,7 @@ impl MarqueeText {
                                     );
                                 },
                             )
-                            .w_full()
-                            .h(gpui::rems(1.5)),
+                            .size_full(),
                         )
                     },
                 ),
@@ -251,7 +258,7 @@ pub(crate) fn header(
         .border_1()
         .border_color(rgb(CARD_HOVER))
         .text_sm()
-        .child(svg_icon("icons/search.svg", PRIMARY, 16.0))
+        .child(svg_icon("icons/search.svg", MUTED, 16.0))
         .child(Input::new(search).appearance(false).w_full())
         .child(
             action_button("search-submit")

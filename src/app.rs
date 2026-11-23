@@ -16,7 +16,7 @@ use crate::spotify;
 use crate::youtube;
 use gpui::{
     AnyElement, App, Application, Bounds, Context, Render, Subscription, Timer, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    TitlebarOptions, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::slider::{Slider, SliderState};
@@ -3945,6 +3945,11 @@ pub(crate) fn run() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Rustify".into()),
+                        ..Default::default()
+                    }),
+                    app_id: Some("rustify".into()),
                     ..Default::default()
                 },
                 |window, cx| {

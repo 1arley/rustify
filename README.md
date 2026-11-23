@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="public/rustify-logo-dark.svg">
+    <img src="public/rustify-logo.svg" alt="Rustify" width="320">
+  </picture>
+</p>
+
 # Rustify
 
 [English](README.md) | [Português (Brasil)](README.pt-BR.md)

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -142,7 +142,8 @@ jobs:
             chmod +x "stage/$name/rustify"
             cp scripts/install.sh "stage/$name/install.sh"
             chmod +x "stage/$name/install.sh"
-            cp -r packaging "stage/$name/packaging"
+            mkdir -p "stage/$name/packaging"
+            cp -r packaging/linux packaging/icons "stage/$name/packaging/"
           else
             mv "stage/$name/rustify.bin" "stage/$name/rustify"
           fi
@@ -213,6 +214,8 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Download artifacts
@@ -245,6 +248,10 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      rendered: ${{ steps.render.outputs.rendered }}
     steps:
       - uses: actions/checkout@v4
 
@@ -255,9 +262,17 @@ jobs:
           path: checksums
 
       - name: Check package name collisions (read-only)
-        run: python3 scripts/check_package_names.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check_package_names.py \
+            --strict \
+            --aur-pkgname "${{ vars.AUR_PKGNAME || 'rustify' }}" \
+            --homebrew-token "${{ vars.HOMEBREW_TOKEN || 'rustify' }}" \
+            --winget-id "${{ vars.WINGET_ID || '1arley.Rustify' }}"
 
       - name: Render package files
+        id: render
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF_NAME}" == v* ]]; then
@@ -268,8 +283,11 @@ jobs:
           python3 scripts/render_packaging.py \
             --version "$version" \
             --checksums-file checksums/SHA256SUMS.txt \
-            --aur-pkgname "${{ vars.AUR_PKGNAME || 'rustify-bin' }}" \
+            --aur-pkgname "${{ vars.AUR_PKGNAME || 'rustify' }}" \
+            --homebrew-token "${{ vars.HOMEBREW_TOKEN || 'rustify' }}" \
+            --winget-id "${{ vars.WINGET_ID || '1arley.Rustify' }}" \
             --out-dir dist-packaging
+          echo "rendered=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload rendered package files
         uses: actions/upload-artifact@v4
@@ -279,7 +297,8 @@ jobs:
 
   publish-aur:
     needs: package-manifests
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.package-manifests.outputs.rendered == 'true'
+    permissions: {}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -292,18 +311,18 @@ jobs:
       - name: Generate .SRCINFO
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/dist-packaging/aur:/pkg" archlinux:base-devel bash -euc '
+          docker run --rm -v "$PWD/dist-packaging/aur:/pkg:ro" archlinux:base-devel bash -euc '
             useradd -m builder
-            chown -R builder /pkg
-            su builder -c "cd /pkg && makepkg --printsrcinfo > .SRCINFO"
-          '
-          chmod -R a+rX dist-packaging/aur
+            cp /pkg/PKGBUILD /home/builder/PKGBUILD
+            chown builder:builder /home/builder/PKGBUILD
+            su builder -c "cd /home/builder && makepkg --printsrcinfo"
+          ' > dist-packaging/aur/.SRCINFO
           grep -q '^pkgbase = ' dist-packaging/aur/.SRCINFO
 
       - name: Push to AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
-          AUR_PKGNAME: ${{ vars.AUR_PKGNAME || 'rustify-bin' }}
+          AUR_PKGNAME: ${{ vars.AUR_PKGNAME || 'rustify' }}
         run: |
           set -euo pipefail
           if [ -z "${AUR_SSH_KEY:-}" ]; then
@@ -313,7 +332,12 @@ jobs:
           install -d -m700 ~/.ssh
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          # Official AUR host key (https://wiki.archlinux.org/title/AUR_submission_guidelines).
+          printf '%s\n' \
+            'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' \
+            > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           git clone "ssh://aur@aur.archlinux.org/${AUR_PKGNAME}.git" aur-repo
           cp dist-packaging/aur/PKGBUILD dist-packaging/aur/.SRCINFO aur-repo/
           cd aur-repo
@@ -329,7 +353,8 @@ jobs:
 
   publish-homebrew:
     needs: package-manifests
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.package-manifests.outputs.rendered == 'true'
+    permissions: {}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -365,7 +390,8 @@ jobs:
 
   publish-winget:
     needs: package-manifests
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.package-manifests.outputs.rendered == 'true'
+    permissions: {}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -378,6 +404,7 @@ jobs:
       - name: Open winget-pkgs pull request
         env:
           GH_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+          WINGET_ID: ${{ vars.WINGET_ID || '1arley.Rustify' }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
@@ -385,16 +412,24 @@ jobs:
             exit 0
           fi
           version="${GITHUB_REF_NAME#v}"
+          publisher="${WINGET_ID%%.*}"
+          first="${publisher:0:1}"
+          first="${first,,}"
+          pkg_path="${WINGET_ID#*.}"
+          pkg_path="${pkg_path//./\/}"
+          manifest_dir="manifests/${first}/${publisher}/${pkg_path}"
           user="$(gh api user -q .login)"
-          gh repo fork microsoft/winget-pkgs --clone=false || true
-          gh repo sync "${user}/winget-pkgs" --source microsoft/winget-pkgs || true
+          gh repo view "${user}/winget-pkgs" >/dev/null 2>&1 \
+            || gh repo fork microsoft/winget-pkgs --clone=false
+
+          # Branch from upstream so a stale fork never causes conflicts.
           git clone --depth 1 --filter=blob:none --sparse \
-            "https://x-access-token:${GH_TOKEN}@github.com/${user}/winget-pkgs.git" winget-pkgs
+            https://github.com/microsoft/winget-pkgs.git winget-pkgs
           cd winget-pkgs
-          git sparse-checkout set manifests/1/1arley
+          git sparse-checkout set "$manifest_dir"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          branch="1arley.Rustify-${version}"
+          branch="${WINGET_ID}-${version}"
           git checkout -B "$branch"
           cp -r ../dist-packaging/winget/manifests/. manifests/
           git add manifests
@@ -402,18 +437,23 @@ jobs:
             echo "Manifests already up to date."
             exit 0
           fi
-          if gh api repos/microsoft/winget-pkgs/contents/manifests/1/1arley/Rustify >/dev/null 2>&1; then
-            title="New version: 1arley.Rustify version ${version}"
+          if [ -d "$manifest_dir" ] && [ -n "$(ls -A "$manifest_dir" 2>/dev/null | grep -v "^${version}$" || true)" ]; then
+            title="New version: ${WINGET_ID} version ${version}"
           else
-            title="New package: 1arley.Rustify version ${version}"
+            title="New package: ${WINGET_ID} version ${version}"
           fi
           git commit -m "$title"
-          git push --force origin "$branch"
-          gh pr create --repo microsoft/winget-pkgs \
-            --head "${user}:${branch}" --base master \
-            --title "$title" \
-            --body "Automated submission from the Rustify release workflow." \
-            || echo "Pull request already exists or could not be created."
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${user}/winget-pkgs.git"
+          git push --force fork "$branch"
+          existing="$(gh pr list --repo microsoft/winget-pkgs --head "${user}:${branch}" --state open --json url -q '.[0].url')"
+          if [ -n "$existing" ]; then
+            echo "Updated existing pull request: $existing"
+          else
+            gh pr create --repo microsoft/winget-pkgs \
+              --head "${user}:${branch}" --base master \
+              --title "$title" \
+              --body "Automated submission from the Rustify release workflow."
+          fi
 
   publish-crate:
     runs-on: ubuntu-latest

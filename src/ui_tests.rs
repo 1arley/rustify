@@ -222,7 +222,7 @@ fn visual_screenshot_demo(cx: &mut TestAppContext) {
 // ---------------------------------------------------------------------------
 
 use crate::components::update_banner;
-use crate::update::{UpdateCheckState, UpdateInfo, is_version_dismissed};
+use crate::update::{UpdateCheckState, UpdateInfo, visible_update};
 
 struct UpdateBannerHarness {
     state: UpdateCheckState,
@@ -249,9 +249,7 @@ impl UpdateBannerHarness {
     }
 
     fn is_banner_visible(&self) -> bool {
-        self.update_available
-            .as_ref()
-            .is_some_and(|info| !is_version_dismissed(&self.state, &info.latest))
+        visible_update(&self.state, &self.update_available).is_some()
     }
 
     fn dismiss(&mut self) {
@@ -263,27 +261,30 @@ impl UpdateBannerHarness {
 
 impl Render for UpdateBannerHarness {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let banner = self
-            .update_available
-            .as_ref()
-            .filter(|_| self.is_banner_visible())
-            .map(|info| {
-                let url = info.release_url.clone();
-                update_banner(
-                    &info.current,
-                    &info.latest,
-                    cx.listener(move |this, _, _, cx| {
-                        this.opened_urls.push(url.clone());
-                        cx.notify();
-                    }),
-                    cx.listener(|this, _, _, cx| {
-                        this.dismiss();
-                        cx.notify();
-                    }),
-                )
-            });
+        let banner = visible_update(&self.state, &self.update_available).map(|info| {
+            let url = info.release_url.clone();
+            update_banner(
+                &info.current,
+                &info.latest,
+                cx.listener(move |this, _, _, cx| {
+                    this.opened_urls.push(url.clone());
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _, cx| {
+                    this.dismiss();
+                    cx.notify();
+                }),
+            )
+        });
         div().w(px(640.)).children(banner)
     }
+}
+
+fn banner_is_laid_out(visual: &mut VisualTestContext) -> bool {
+    let dismiss = visual.debug_bounds("update-banner-dismiss").is_some();
+    let open = visual.debug_bounds("update-banner-open").is_some();
+    assert_eq!(dismiss, open, "banner buttons must appear together");
+    dismiss
 }
 
 #[gpui::test]
@@ -292,6 +293,7 @@ fn update_banner_renders_and_hides_when_dismissed(cx: &mut TestAppContext) {
     let window = cx.add_window(|_, _| UpdateBannerHarness::new("0.3.0"));
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
+    assert!(banner_is_laid_out(&mut visual));
 
     window
         .update(&mut visual, |view, _, cx| {
@@ -301,18 +303,30 @@ fn update_banner_renders_and_hides_when_dismissed(cx: &mut TestAppContext) {
         })
         .unwrap();
     visual.run_until_parked();
+    assert!(!banner_is_laid_out(&mut visual));
 
+    // A newer release re-shows the banner in the same session.
     window
         .update(&mut visual, |view, _, cx| {
             assert_eq!(view.state.dismissed_version.as_deref(), Some("0.3.0"));
             assert!(!view.is_banner_visible());
-
             view.update_available = Some(UpdateBannerHarness::info("0.4.0"));
             assert!(view.is_banner_visible());
             cx.notify();
         })
         .unwrap();
     visual.run_until_parked();
+    assert!(banner_is_laid_out(&mut visual));
+
+    // Opting out hides it.
+    window
+        .update(&mut visual, |view, _, cx| {
+            view.state.enabled = false;
+            cx.notify();
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(!banner_is_laid_out(&mut visual));
 }
 
 #[gpui::test]
@@ -352,4 +366,6 @@ fn update_banner_click_triggers_actions(cx: &mut TestAppContext) {
             assert!(!view.is_banner_visible());
         })
         .unwrap();
+    // Layout removal is asserted in `update_banner_renders_and_hides_when_dismissed`;
+    // after a simulated click the test window is not redrawn until the next frame.
 }

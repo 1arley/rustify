@@ -19,7 +19,7 @@ Arquivos JSON/CSV escolhidos pelo usuário são lidos localmente e convertidos e
 
 ## Verificação de atualização
 
-Por padrão, ao abrir o app (no máximo uma vez a cada 24 horas) e quando você pede em **Importar → Sobre e atualizações**, o Rustify faz um `GET` público em `https://api.github.com/repos/1arley/rustify/releases/latest` com o cabeçalho `User-Agent: rustify/<versão>`. Nenhum dado seu, identificador ou telemetria é enviado, e nada é baixado ou instalado: o app só compara versões e, se você pedir, abre a página da release no navegador. Falhas de rede são ignoradas. Desligue a opção **Verificar atualizações ao abrir** na mesma tela para não fazer essa consulta automática.
+Por padrão, ao abrir o app (no máximo uma vez a cada 24 horas) e quando você pede em **Sobre e atualizações** (versão no rodapé da barra lateral ou botão na Biblioteca), o Rustify faz um `GET` público em `https://api.github.com/repos/1arley/rustify/releases/latest` com o cabeçalho `User-Agent: rustify/<versão>`. Nenhum dado seu, identificador ou telemetria é enviado, e nada é baixado ou instalado: o app só compara versões e, se você pedir, abre a página da release no navegador. Falhas de rede são ignoradas. Desligue a opção **Verificar atualizações ao abrir** na mesma tela para não fazer essa consulta automática.
 
 ## Armazenamento
 

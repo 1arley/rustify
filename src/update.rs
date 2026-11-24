@@ -103,14 +103,6 @@ fn parse_part(part: &str) -> Option<u64> {
     part.parse().ok()
 }
 
-#[allow(dead_code)]
-pub(crate) fn is_newer_version(current: &str, candidate: &str) -> bool {
-    match (normalize_version(current), normalize_version(candidate)) {
-        (Some(current), Some(candidate)) => candidate > current,
-        _ => false,
-    }
-}
-
 pub(crate) fn is_version_dismissed(state: &UpdateCheckState, version: &str) -> bool {
     let Some(dismissed) = state.dismissed_version.as_deref() else {
         return false;
@@ -146,6 +138,19 @@ pub(crate) fn release_tag_url(version: &str) -> String {
         Some(version) => format!("https://github.com/1arley/rustify/releases/tag/v{version}"),
         None => RELEASES_PAGE_URL.to_owned(),
     }
+}
+
+/// The update to advertise: none when checks are disabled or this version was dismissed.
+pub(crate) fn visible_update<'a>(
+    state: &UpdateCheckState,
+    available: &'a Option<UpdateInfo>,
+) -> Option<&'a UpdateInfo> {
+    if !state.enabled {
+        return None;
+    }
+    available
+        .as_ref()
+        .filter(|info| !is_version_dismissed(state, &info.latest))
 }
 
 /// Update known from a previous check, if still newer and not dismissed.
@@ -201,12 +206,13 @@ struct GithubRelease {
 }
 
 fn is_trusted_release_url(url: &Url) -> bool {
+    let path = url.path();
     url.scheme() == "https"
         && url.host_str() == Some("github.com")
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
-        && url.path().starts_with(RELEASES_PATH_PREFIX)
+        && (path == RELEASES_PATH_PREFIX || path.starts_with("/1arley/rustify/releases/tag/"))
 }
 
 fn validated_release_url(candidate: &str, latest: Version) -> String {
@@ -305,9 +311,6 @@ mod tests {
         ] {
             assert!(normalize_version(invalid).is_none(), "{invalid}");
         }
-        assert!(is_newer_version("0.2.0", "v0.2.1"));
-        assert!(!is_newer_version("0.2.1", "0.2.1"));
-        assert!(!is_newer_version("0.2.1", "garbage"));
     }
 
     #[test]
@@ -346,6 +349,48 @@ mod tests {
             untrusted.release_url,
             "https://github.com/1arley/rustify/releases/tag/v0.3.0"
         );
+    }
+
+    #[test]
+    fn untrusted_release_urls_fall_back_to_the_tag_page() {
+        let fallback = "https://github.com/1arley/rustify/releases/tag/v0.3.0";
+        for url in [
+            "https://github.com/1arley/rustify/releases/download/v0.3.0/evil.sh",
+            "https://github.com/1arley/rustify/releases_other",
+            "http://github.com/1arley/rustify/releases/tag/v0.3.0",
+            "https://github.com:8443/1arley/rustify/releases/tag/v0.3.0",
+        ] {
+            let info = parse_release_update(release("v0.3.0", false, false, url), "0.2.0").unwrap();
+            assert_eq!(info.release_url, fallback, "{url}");
+        }
+        let page =
+            parse_release_update(release("v0.3.0", false, false, RELEASES_PAGE_URL), "0.2.0")
+                .unwrap();
+        assert_eq!(page.release_url, RELEASES_PAGE_URL);
+    }
+
+    #[test]
+    fn visible_update_follows_enabled_and_per_version_dismissal() {
+        let available: Option<UpdateInfo> = None;
+        assert!(visible_update(&UpdateCheckState::default(), &available).is_none());
+
+        let info = |latest: &str| UpdateInfo {
+            current: "0.2.0".to_owned(),
+            latest: latest.to_owned(),
+            release_url: release_tag_url(latest),
+            published_at: None,
+        };
+        let mut state = UpdateCheckState::default();
+        let v3 = Some(info("0.3.0"));
+        assert!(visible_update(&state, &v3).is_some());
+
+        state.dismissed_version = Some("0.3.0".to_owned());
+        assert!(visible_update(&state, &v3).is_none());
+        assert!(visible_update(&state, &Some(info("0.4.0"))).is_some());
+
+        state.dismissed_version = None;
+        state.enabled = false;
+        assert!(visible_update(&state, &v3).is_none());
     }
 
     #[test]

@@ -105,7 +105,7 @@ Para adicionar a entrada/ícone no menu a partir do código:
 
 - **Gerenciador de pacotes:** `yay -Syu`, `brew upgrade --cask rustify` ou `winget upgrade 1arley.Rustify`.
 - **Arquivo da release:** baixe o novo arquivo em [Releases](https://github.com/1arley/rustify/releases) e rode `./install.sh` de novo (ou substitua a pasta).
-- **No app:** o Rustify consulta a última release pública no GitHub ao abrir (no máximo uma vez a cada 24 horas) e mostra um banner dispensável quando existe uma versão mais nova. Ele nunca baixa nem instala nada sozinho. Em **Biblioteca → Importar → Sobre e atualizações** você verifica manualmente, vê a versão atual ou desliga a verificação.
+- **No app:** o Rustify consulta a última release pública no GitHub ao abrir (no máximo uma vez a cada 24 horas) e mostra um banner dispensável quando existe uma versão mais nova. Ele nunca baixa nem instala nada sozinho. Em **Biblioteca → Sobre e atualizações** (ou a versão no rodapé da barra lateral) você verifica manualmente, vê a versão atual ou desliga a verificação.
 
 ## O que você precisa
 

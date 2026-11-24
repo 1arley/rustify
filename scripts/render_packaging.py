@@ -43,7 +43,7 @@ def parse_version(raw):
 
 def parse_checksums(path):
     found = {}
-    for line in Path(path).read_text().splitlines():
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
@@ -58,7 +58,7 @@ def parse_checksums(path):
 
 
 def render(template, values):
-    text = template.read_text()
+    text = template.read_text(encoding="utf-8")
     for key, value in values.items():
         text = text.replace(f"@{key}@", value)
     leftover = PLACEHOLDER_RE.findall(text)
@@ -69,7 +69,7 @@ def render(template, values):
 
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {path}")
 
 
@@ -81,7 +81,7 @@ def main():
     parser.add_argument("--linux-sha256")
     parser.add_argument("--macos-sha256")
     parser.add_argument("--windows-sha256")
-    parser.add_argument("--aur-pkgname", default="rustify-bin")
+    parser.add_argument("--aur-pkgname", default="rustify")
     parser.add_argument("--homebrew-token", default="rustify")
     parser.add_argument("--winget-id", default="1arley.Rustify")
     parser.add_argument(
@@ -116,9 +116,15 @@ def main():
     base = {"VERSION": version}
 
     if "linux" in sums:
+        provides = (
+            ""
+            if args.aur_pkgname == "rustify"
+            else "provides=('rustify')\nconflicts=('rustify')"
+        )
         values = {
             **base,
             "AUR_PKGNAME": args.aur_pkgname,
+            "AUR_PROVIDES_CONFLICTS": provides,
             "LINUX_SHA256": sums["linux"],
         }
         pkgbuild = out / "aur" / "PKGBUILD"

@@ -65,6 +65,7 @@ enum ActivePage {
     Playlist,
     Import,
     Queue,
+    About,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -126,7 +127,7 @@ struct Home {
     update_state: UpdateCheckState,
     update_available: Option<UpdateInfo>,
     update_checking: bool,
-    update_banner_dismissed_session: bool,
+    focus_handle: gpui::FocusHandle,
     update_status_message: Option<String>,
 }
 
@@ -293,7 +294,7 @@ impl Home {
             update_state,
             update_available,
             update_checking: false,
-            update_banner_dismissed_session: false,
+            focus_handle: cx.focus_handle(),
             update_status_message: None,
         }
     }
@@ -334,11 +335,7 @@ impl Home {
     }
 
     fn visible_update_banner(&self) -> Option<&UpdateInfo> {
-        self.update_available.as_ref().filter(|info| {
-            self.update_state.enabled
-                && !self.update_banner_dismissed_session
-                && !update::is_version_dismissed(&self.update_state, &info.latest)
-        })
+        update::visible_update(&self.update_state, &self.update_available)
     }
 
     fn check_for_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
@@ -384,6 +381,8 @@ impl Home {
                         }
                     }
                     Err(error) => {
+                        view.update_state.last_checked_at = Some(update::now_unix_secs());
+                        let _ = update::save_state(&view.update_state);
                         if manual {
                             view.update_status_message =
                                 Some(format!("Não foi possível verificar atualizações: {error}"));
@@ -398,24 +397,28 @@ impl Home {
 
     fn dismiss_update_version(&mut self, cx: &mut Context<Self>) {
         if let Some(info) = &self.update_available {
-            self.update_state.dismissed_version = Some(info.latest.clone());
-            let _ = update::save_state(&self.update_state);
+            let mut state = self.update_state.clone();
+            state.dismissed_version = Some(info.latest.clone());
+            match update::save_state(&state) {
+                Ok(()) => self.update_state = state,
+                Err(error) => {
+                    self.update_status_message = Some(format!(
+                        "Não foi possível salvar a dispensa da atualização: {error}"
+                    ));
+                }
+            }
         }
-        self.update_banner_dismissed_session = true;
         cx.notify();
     }
 
     fn set_update_checks_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.update_state.enabled = enabled;
-        let _ = update::save_state(&self.update_state);
-        if enabled {
-            self.update_banner_dismissed_session = false;
-            if self.update_available.is_none() {
-                self.update_available =
-                    update::cached_update(&self.update_state, update::CURRENT_VERSION);
-            }
-        } else {
-            self.update_banner_dismissed_session = true;
+        if let Err(error) = update::save_state(&self.update_state) {
+            self.update_status_message = Some(error);
+        }
+        if enabled && self.update_available.is_none() {
+            self.update_available =
+                update::cached_update(&self.update_state, update::CURRENT_VERSION);
         }
         cx.notify();
     }
@@ -1285,6 +1288,7 @@ impl Home {
             ActivePage::Playlist => self.playlist_panel(cx),
             ActivePage::Import => self.import_panel(cx),
             ActivePage::Queue => self.queue_panel(cx),
+            ActivePage::About => self.about_panel(cx),
         };
         let banner = self.visible_update_banner().map(|info| {
             let url = info.release_url.clone();
@@ -1833,14 +1837,31 @@ impl Home {
                             ),
                     )
                     .child(
-                        action_button("library-import")
-                            .ghost()
-                            .child(svg_icon("icons/import.svg", MUTED, 16.0))
-                            .label("Importar músicas e playlists")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_page = ActivePage::Import;
-                                cx.notify();
-                            })),
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                action_button("library-import")
+                                    .ghost()
+                                    .child(svg_icon("icons/import.svg", MUTED, 16.0))
+                                    .label("Importar músicas e playlists")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_page = ActivePage::Import;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                action_button("library-about")
+                                    .ghost()
+                                    .text_color(rgb(MUTED))
+                                    .label("Sobre e atualizações")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_page = ActivePage::About;
+                                        cx.notify();
+                                    })),
+                            ),
                     )
                     .child(playlists)
                     .child(
@@ -2573,6 +2594,43 @@ impl Home {
                                     }))
                                     .into_any_element()
                             }),
+                    )
+                    .child(self.message_card()),
+            )
+            .into_any_element()
+    }
+
+    fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_6()
+            .py_4()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ACCENT))
+                            .child("SOBRE O RUSTIFY"),
+                    )
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Sobre e atualizações"),
+                    )
+                    .child(
+                        div().text_sm().text_color(rgb(MUTED)).child(
+                            "Versão instalada e preferências de verificação de novas releases.",
+                        ),
                     )
                     .child(self.about_card(cx))
                     .child(self.message_card()),
@@ -3448,7 +3506,11 @@ impl Home {
                     .px_3()
                     .py_1()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(if self.active_page == ActivePage::About {
+                        0xffffff
+                    } else {
+                        MUTED
+                    }))
                     .tooltip("Sobre e atualizações")
                     .child(format!("v{}", update::CURRENT_VERSION))
                     .when(has_update, |this| {
@@ -3462,7 +3524,7 @@ impl Home {
                         )
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.active_page = ActivePage::Import;
+                        this.active_page = ActivePage::About;
                         cx.notify();
                     })),
             )
@@ -4156,6 +4218,12 @@ impl Home {
     }
 }
 
+impl gpui::Focusable for Home {
+    fn focus_handle(&self, _cx: &App) -> gpui::FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(path) = self.pending_file_path.take() {
@@ -4216,6 +4284,8 @@ impl Render for Home {
             .flex_col()
             .bg(rgb(BLACK))
             .text_color(rgb(0xffffff))
+            .key_context("Rustify")
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
                 this.check_for_updates(true, cx);
             }))
@@ -4295,6 +4365,8 @@ pub(crate) fn run() {
                         home.start_update_check(cx);
                         home
                     });
+                    let focus_handle = home.read(cx).focus_handle.clone();
+                    window.focus(&focus_handle);
                     cx.new(|cx| Root::new(home, window, cx))
                 },
             )

@@ -6,7 +6,7 @@ afterwards and never block them.
 
 | Channel | Package | Template | Published by |
 | --- | --- | --- | --- |
-| AUR (Arch/Omarchy) | `rustify-bin` | `aur/PKGBUILD.tmpl` | `publish-aur` job (SSH push) |
+| AUR (Arch/Omarchy) | `rustify` | `aur/PKGBUILD.tmpl` | `publish-aur` job (SSH push) |
 | Homebrew cask | `1arley/tap/rustify` | `homebrew/Casks/rustify.rb.tmpl` | `publish-homebrew` job (push to tap) |
 | Winget | `1arley.Rustify` | `winget/*.tmpl` | `publish-winget` job (PR to `microsoft/winget-pkgs`) |
 
@@ -18,9 +18,10 @@ the SHA-256 values from `SHA256SUMS.txt` (also attached to each release).
 
 Checked on 2026-11-23 with `scripts/check_package_names.py`:
 
-- AUR: `rustify`, `rustify-bin` and `rustify-player-bin` were free. The `-bin`
-  suffix follows the AUR convention for prebuilt binaries; the package
-  `provides`/`conflicts` with `rustify`.
+- AUR: `rustify`, `rustify-bin` and `rustify-player-bin` were free. `rustify` is
+  preferred; `rustify-player-bin` is the fallback if it becomes occupied. The
+  `-bin` suffix follows the AUR convention for prebuilt binaries, and fallback
+  packages `provide`/`conflict` with `rustify`.
 - Homebrew: `rustify` is free in `homebrew-cask` and `homebrew-core`. It is
   published from our own tap `1arley/homebrew-tap`.
 - Winget: `1arley.Rustify` is free in `microsoft/winget-pkgs`.
@@ -39,9 +40,11 @@ Each publish job skips with a notice when its secret is missing.
 | --- | --- | --- |
 | `AUR_SSH_KEY` | `publish-aur` | SSH private key registered on the AUR account that maintains the package |
 | `HOMEBREW_TAP_TOKEN` | `publish-homebrew` | Fine-grained token, `contents: write` on `1arley/homebrew-tap` only |
-| `WINGET_GITHUB_TOKEN` | `publish-winget` | Classic token with `public_repo` (or fine-grained on the fork) to push a branch and open a PR |
-| `AUR_PKGNAME` (variable, optional) | `publish-aur` | Overrides `rustify-bin` |
+| `WINGET_GITHUB_TOKEN` | `publish-winget` | Classic token with `public_repo` scope: it pushes to your `winget-pkgs` fork and opens a cross-repository PR to `microsoft/winget-pkgs`, which fine-grained tokens scoped to the fork cannot do |
+| `AUR_PKGNAME` (variable, optional) | `package-manifests`, `publish-aur` | Overrides `rustify`; set it to the documented fallback if the preferred name is taken |
 | `HOMEBREW_TAP_REPO` (variable, optional) | `publish-homebrew` | Overrides `1arley/homebrew-tap` |
+| `HOMEBREW_TOKEN` (variable, optional) | `package-manifests` | Overrides the cask name `rustify` |
+| `WINGET_ID` (variable, optional) | `package-manifests`, `publish-winget` | Overrides `1arley.Rustify` |
 
 The AUR package must be created once by pushing the first `PKGBUILD` and
 `.SRCINFO` manually or with the job; the Winget package needs a fork of
@@ -69,5 +72,5 @@ so it can be inspected before the first real publish.
    name-collision output in its log.
 4. `publish-aur`, `publish-homebrew` and `publish-winget` push or open PRs.
    A failed job can be re-run on its own.
-5. Confirm `yay -S rustify-bin`, `brew install --cask 1arley/tap/rustify`
+5. Confirm `yay -S rustify`, `brew install --cask 1arley/tap/rustify`
    and `winget install 1arley.Rustify` pick up the new version.

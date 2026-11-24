@@ -1,0 +1,17 @@
+# GPUI Visual Test Screenshot
+
+Window: 
+
+This file marks the attempt to capture the window using GPUI's
+screen capture infrastructure.
+
+For full pixel-level capture, the TestScreenCaptureSource implementation
+would need to be extended to:
+
+1. Capture the GPUI window's rendered frame using platform GPU read-back
+2. Convert the captured frame to RGB/BGRA pixel data
+3. Provide the pixel data through the screen capture stream callback
+
+The GPUI test framework provides VisualTestContext for interaction testing
+(mouse clicks, keyboard, state verification). Visual regression testing
+can be built on top by capturing and comparing pixel data between runs.

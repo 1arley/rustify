@@ -9,6 +9,7 @@ mod queue;
 mod spotify;
 #[cfg(test)]
 mod ui_tests;
+mod update;
 mod youtube;
 
 fn main() {

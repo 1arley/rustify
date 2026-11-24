@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::catalog::{self, Track, TrackId};
 use crate::components::{
     Assets, Http, MarqueeText, action_button, action_button_when, artwork, header, icon_heart,
-    status_card, svg_icon,
+    status_card, svg_icon, update_banner,
 };
 use crate::design::{
     ACCENT, BLACK, CARD, CARD_HOVER, ERROR, INFO, MUTED, PRIMARY, SURFACE, cover_color,
@@ -13,6 +13,7 @@ use crate::home::playback_status;
 use crate::library::{self, SavedPlaylist, SpotifySnapshot};
 use crate::playback::{self, PlaybackCommand, PlaybackItem, PlaybackState, QueueCommand};
 use crate::spotify;
+use crate::update::{self, UpdateCheckState, UpdateInfo};
 use crate::youtube;
 use gpui::{
     AnyElement, App, Application, Bounds, Context, Render, Subscription, Timer, TitlebarOptions,
@@ -21,10 +22,21 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{
-    Disableable, Root,
+    Disableable, Root, Sizable,
     button::ButtonVariants,
     menu::{ContextMenuExt, PopupMenuItem},
+    switch::Switch,
 };
+
+gpui::actions!(
+    rustify,
+    [
+        CheckForUpdates,
+        DismissUpdateVersion,
+        ToggleUpdateChecks,
+        OpenReleasePage
+    ]
+);
 
 fn playback_item(track: &Track) -> PlaybackItem {
     PlaybackItem {
@@ -111,6 +123,11 @@ struct Home {
     pending_file_path: Option<String>,
     confirm_legacy_cleanup: bool,
     message: Option<String>,
+    update_state: UpdateCheckState,
+    update_available: Option<UpdateInfo>,
+    update_checking: bool,
+    update_banner_dismissed_session: bool,
+    update_status_message: Option<String>,
 }
 
 impl Home {
@@ -140,6 +157,8 @@ impl Home {
             .or(local_playlists_err);
         let client_id = spotify::client_id().unwrap_or_default();
         let spotify_connected = spotify::is_connected(&client_id);
+        let update_state = update::load_state().unwrap_or_default();
+        let update_available = update::cached_update(&update_state, update::CURRENT_VERSION);
 
         let search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("O que você quer ouvir? (ou cole um link)")
@@ -191,24 +210,22 @@ impl Home {
         let seek_page = cx.new(|_| SliderState::new().max(100.).step(0.1));
         let volume = cx.new(|_| SliderState::new().max(100.).default_value(50.));
         let volume_page = cx.new(|_| SliderState::new().max(100.).default_value(50.));
-        let _seek_subscription = cx.subscribe(&seek, |this, _, event: &SliderEvent, cx| {
-            match event {
+        let _seek_subscription =
+            cx.subscribe(&seek, |this, _, event: &SliderEvent, cx| match event {
                 SliderEvent::Change(_) => {
                     this.active_seek = Some(SeekSlider::Player);
                     cx.notify();
                 }
-            }
-        });
-        let _seek_page_subscription = cx.subscribe(&seek_page, |this, _, event: &SliderEvent, cx| {
-            match event {
+            });
+        let _seek_page_subscription =
+            cx.subscribe(&seek_page, |this, _, event: &SliderEvent, cx| match event {
                 SliderEvent::Change(_) => {
                     this.active_seek = Some(SeekSlider::Page);
                     cx.notify();
                 }
-            }
-        });
-        let _volume_subscription = cx.subscribe(&volume, |this, _, event: &SliderEvent, cx| {
-            match event {
+            });
+        let _volume_subscription =
+            cx.subscribe(&volume, |this, _, event: &SliderEvent, cx| match event {
                 SliderEvent::Change(value) => {
                     this.active_volume = Some(VolumeSlider::Player);
                     if this.playback.connected {
@@ -216,20 +233,19 @@ impl Home {
                     }
                     cx.notify();
                 }
-            }
-        });
-        let _volume_page_subscription =
-            cx.subscribe(&volume_page, |this, _, event: &SliderEvent, cx| {
-                match event {
-                    SliderEvent::Change(value) => {
-                        this.active_volume = Some(VolumeSlider::Page);
-                        if this.playback.connected {
-                            this.run_command(PlaybackCommand::Volume(value.start()), cx);
-                        }
-                        cx.notify();
-                    }
-                }
             });
+        let _volume_page_subscription = cx.subscribe(
+            &volume_page,
+            |this, _, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => {
+                    this.active_volume = Some(VolumeSlider::Page);
+                    if this.playback.connected {
+                        this.run_command(PlaybackCommand::Volume(value.start()), cx);
+                    }
+                    cx.notify();
+                }
+            },
+        );
         Self {
             seek,
             seek_page,
@@ -274,6 +290,11 @@ impl Home {
             pending_file_path: None,
             confirm_legacy_cleanup: false,
             message: None,
+            update_state,
+            update_available,
+            update_checking: false,
+            update_banner_dismissed_session: false,
+            update_status_message: None,
         }
     }
 
@@ -301,6 +322,126 @@ impl Home {
                     break;
                 }
                 Timer::after(Duration::from_secs(1)).await;
+            }
+        })
+        .detach();
+    }
+
+    fn start_update_check(&mut self, cx: &mut Context<Self>) {
+        if update::should_check(&self.update_state, update::now_unix_secs()) {
+            self.check_for_updates(false, cx);
+        }
+    }
+
+    fn visible_update_banner(&self) -> Option<&UpdateInfo> {
+        self.update_available.as_ref().filter(|info| {
+            self.update_state.enabled
+                && !self.update_banner_dismissed_session
+                && !update::is_version_dismissed(&self.update_state, &info.latest)
+        })
+    }
+
+    fn check_for_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update_checking {
+            return;
+        }
+        if !manual && !update::should_check(&self.update_state, update::now_unix_secs()) {
+            return;
+        }
+        self.update_checking = true;
+        if manual {
+            self.update_status_message = Some("Verificando atualizações…".to_owned());
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { update::check_latest_release() })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.update_checking = false;
+                match result {
+                    Ok(Some(info)) => {
+                        view.update_state.last_checked_at = Some(update::now_unix_secs());
+                        view.update_state.latest_seen = Some(info.latest.clone());
+                        let _ = update::save_state(&view.update_state);
+                        if manual {
+                            view.update_status_message =
+                                Some(format!("Nova versão {} disponível.", info.latest));
+                        }
+                        view.update_available = Some(info);
+                    }
+                    Ok(None) => {
+                        view.update_state.last_checked_at = Some(update::now_unix_secs());
+                        view.update_state.latest_seen = None;
+                        let _ = update::save_state(&view.update_state);
+                        view.update_available = None;
+                        if manual {
+                            view.update_status_message = Some(format!(
+                                "Você já está na versão mais recente (v{}).",
+                                update::CURRENT_VERSION
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        if manual {
+                            view.update_status_message =
+                                Some(format!("Não foi possível verificar atualizações: {error}"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn dismiss_update_version(&mut self, cx: &mut Context<Self>) {
+        if let Some(info) = &self.update_available {
+            self.update_state.dismissed_version = Some(info.latest.clone());
+            let _ = update::save_state(&self.update_state);
+        }
+        self.update_banner_dismissed_session = true;
+        cx.notify();
+    }
+
+    fn set_update_checks_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update_state.enabled = enabled;
+        let _ = update::save_state(&self.update_state);
+        if enabled {
+            self.update_banner_dismissed_session = false;
+            if self.update_available.is_none() {
+                self.update_available =
+                    update::cached_update(&self.update_state, update::CURRENT_VERSION);
+            }
+        } else {
+            self.update_banner_dismissed_session = true;
+        }
+        cx.notify();
+    }
+
+    fn toggle_update_checks(&mut self, cx: &mut Context<Self>) {
+        self.set_update_checks_enabled(!self.update_state.enabled, cx);
+    }
+
+    fn open_release_page(&mut self, url: Option<String>, cx: &mut Context<Self>) {
+        let target = url
+            .or_else(|| {
+                self.update_available
+                    .as_ref()
+                    .map(|info| info.release_url.clone())
+            })
+            .unwrap_or_else(|| update::RELEASES_PAGE_URL.to_owned());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { update::open_release_page(&target) })
+                .await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |view, cx| {
+                    view.update_status_message = Some(error);
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -1145,6 +1286,15 @@ impl Home {
             ActivePage::Import => self.import_panel(cx),
             ActivePage::Queue => self.queue_panel(cx),
         };
+        let banner = self.visible_update_banner().map(|info| {
+            let url = info.release_url.clone();
+            update_banner(
+                &info.current,
+                &info.latest,
+                cx.listener(move |this, _, _, cx| this.open_release_page(Some(url.clone()), cx)),
+                cx.listener(|this, _, _, cx| this.dismiss_update_version(cx)),
+            )
+        });
         div()
             .flex_1()
             .min_w_0()
@@ -1153,7 +1303,14 @@ impl Home {
             .overflow_scroll()
             .rounded_md()
             .bg(rgb(SURFACE))
-            .child(panel)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .when_some(banner, |this, banner| this.child(banner))
+                    .child(panel),
+            )
     }
 
     fn home_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2417,9 +2574,113 @@ impl Home {
                                     .into_any_element()
                             }),
                     )
+                    .child(self.about_card(cx))
                     .child(self.message_card()),
             )
             .into_any_element()
+    }
+
+    fn about_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let release_url = self
+            .update_available
+            .as_ref()
+            .map(|info| info.release_url.clone());
+        let open_label = self
+            .update_available
+            .as_ref()
+            .map(|info| format!("Abrir release v{}", info.latest));
+        div()
+            .rounded_md()
+            .bg(rgb(CARD))
+            .border_1()
+            .border_color(rgb(CARD_HOVER))
+            .p_5()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Sobre e atualizações"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(MUTED))
+                            .child(format!("Rustify v{}", update::CURRENT_VERSION)),
+                    ),
+            )
+            .child(div().text_xs().text_color(rgb(MUTED)).child(
+                "Consulta apenas a última release pública no GitHub (cache de 24 h). Nada é baixado ou instalado automaticamente.",
+            ))
+            .child(
+                Switch::new("update-auto-check-switch")
+                    .small()
+                    .checked(self.update_state.enabled)
+                    .label("Verificar atualizações ao abrir")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.set_update_checks_enabled(*checked, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        action_button_when("update-check-now", !self.update_checking)
+                            .bg(rgb(SURFACE))
+                            .border_color(rgb(CARD_HOVER))
+                            .text_color(rgb(0xffffff))
+                            .disabled(self.update_checking)
+                            .child(if self.update_checking {
+                                "Verificando…"
+                            } else {
+                                "Verificar atualizações"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.check_for_updates(true, cx);
+                            })),
+                    )
+                    .when_some(open_label.zip(release_url), |this, (label, url)| {
+                        this.child(
+                            action_button("update-about-open-release")
+                                .bg(rgb(PRIMARY))
+                                .text_color(rgb(0xffffff))
+                                .child(svg_icon("icons/external.svg", 0xffffff, 13.0))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_release_page(Some(url.clone()), cx);
+                                })),
+                        )
+                    })
+                    .when(self.update_available.is_none(), |this| {
+                        this.child(
+                            action_button("update-about-releases")
+                                .ghost()
+                                .text_color(rgb(MUTED))
+                                .child("Ver releases no GitHub")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_release_page(
+                                        Some(update::RELEASES_PAGE_URL.to_owned()),
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }),
+            )
+            .when_some(self.update_status_message.clone(), |this, status| {
+                this.child(div().text_xs().text_color(rgb(MUTED)).child(status))
+            })
     }
 
     fn queue_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2990,6 +3251,7 @@ impl Home {
 
     fn sidebar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let home = cx.entity().downgrade();
+        let has_update = self.visible_update_banner().is_some();
         let playlist_rows: Vec<_> = self
             .playlists
             .iter()
@@ -3175,6 +3437,35 @@ impl Home {
                     .child(playlist_list)
                     .into_any_element()
             })
+            .child(
+                action_button("sidebar-version-about")
+                    .ghost()
+                    .w_full()
+                    .compact()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .tooltip("Sobre e atualizações")
+                    .child(format!("v{}", update::CURRENT_VERSION))
+                    .when(has_update, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().size(px(6.0)).rounded_full().bg(rgb(ACCENT)))
+                                .when(!compact, |this| this.child("Atualização")),
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.active_page = ActivePage::Import;
+                        cx.notify();
+                    })),
+            )
     }
 
     fn mobile_nav_item(
@@ -3925,6 +4216,18 @@ impl Render for Home {
             .flex_col()
             .bg(rgb(BLACK))
             .text_color(rgb(0xffffff))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
+                this.check_for_updates(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DismissUpdateVersion, _, cx| {
+                this.dismiss_update_version(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleUpdateChecks, _, cx| {
+                this.toggle_update_checks(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenReleasePage, _, cx| {
+                this.open_release_page(None, cx);
+            }))
             .child(header(
                 &self.search_input,
                 mobile,
@@ -3971,6 +4274,8 @@ pub(crate) fn run() {
                 theme.caret = rgb(0xffffff).into();
                 theme.slider_bar = rgb(0xffffff).into();
                 theme.slider_thumb = rgb(0xffffff).into();
+                theme.switch = rgb(0x525252).into();
+                theme.switch_thumb = rgb(BLACK).into();
             }
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
             cx.open_window(
@@ -3985,8 +4290,9 @@ pub(crate) fn run() {
                 },
                 |window, cx| {
                     let home = cx.new(|cx| {
-                        let home = Home::new(window, cx);
+                        let mut home = Home::new(window, cx);
                         home.start_polling(cx);
+                        home.start_update_check(cx);
                         home
                     });
                     cx.new(|cx| Root::new(home, window, cx))

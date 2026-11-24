@@ -618,37 +618,46 @@ fn apply_single_resolved_link(tracks: &mut [Track], spotify_key: &str, yt_id: &s
     changed
 }
 
-fn load_json_or_default<T: DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
+pub(crate) fn load_json_or_default<T: DeserializeOwned + Default>(
+    path: &Path,
+) -> Result<T, String> {
     let contents = match fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(T::default()),
-        Err(error) => return Err(format!("Não foi possível ler a biblioteca local: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "Não foi possível ler o armazenamento local: {error}"
+            ));
+        }
     };
     serde_json::from_slice(&contents)
-        .map_err(|error| format!("A biblioteca local não contém dados válidos: {error}"))
+        .map_err(|error| format!("O armazenamento local não contém dados válidos: {error}"))
 }
 
-fn save_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), String> {
+pub(crate) fn save_json_atomic<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<(), String> {
     let parent = path
         .parent()
-        .ok_or_else(|| "O diretório da biblioteca local é inválido.".to_owned())?;
+        .ok_or_else(|| "O diretório de armazenamento local é inválido.".to_owned())?;
     fs::create_dir_all(parent)
-        .map_err(|error| format!("Não foi possível criar a biblioteca local: {error}"))?;
+        .map_err(|error| format!("Não foi possível criar o armazenamento local: {error}"))?;
 
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let contents = serde_json::to_vec_pretty(value)
-        .map_err(|error| format!("Não foi possível serializar a biblioteca local: {error}"))?;
+        .map_err(|error| format!("Não foi possível serializar o armazenamento local: {error}"))?;
     let write_result = fs::write(&temporary, contents).and_then(|()| fs::rename(&temporary, path));
     if let Err(error) = write_result {
         let _ = fs::remove_file(temporary);
         return Err(format!(
-            "Não foi possível salvar a biblioteca local: {error}"
+            "Não foi possível salvar o armazenamento local: {error}"
         ));
     }
     Ok(())
 }
 
-fn storage_path(file_name: &str) -> Result<PathBuf, String> {
+pub(crate) fn storage_path(file_name: &str) -> Result<PathBuf, String> {
     let data_dir = dirs::data_local_dir()
         .ok_or_else(|| "Não foi possível localizar a pasta de dados do usuário.".to_owned())?;
     Ok(data_dir.join("rustify").join(file_name))

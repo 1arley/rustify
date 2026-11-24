@@ -383,6 +383,84 @@ pub(crate) fn status_card(title: &str, message: &str, kind: &str) -> impl IntoEl
         )
 }
 
+/// Banner discreto e dispensável avisando que existe uma release mais nova.
+pub(crate) fn update_banner(
+    current_version: &str,
+    latest_version: &str,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div().w_full().flex().justify_center().px_6().pt_4().child(
+        div()
+            .id("update-available-banner")
+            .w_full()
+            .max_w(px(1000.0))
+            .rounded_md()
+            .bg(rgb(CARD))
+            .border_l_4()
+            .border_color(rgb(ACCENT))
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size(px(8.0)).rounded_full().bg(rgb(ACCENT)))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(format!("Nova versão {latest_version} disponível")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(format!("Atual: v{current_version}")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .debug_selector(|| "update-banner-open".to_owned())
+                            .child(
+                                action_button("update-banner-open")
+                                    .bg(rgb(PRIMARY))
+                                    .text_color(rgb(0xffffff))
+                                    .child(svg_icon("icons/external.svg", 0xffffff, 13.0))
+                                    .child("Abrir release")
+                                    .on_click(on_open),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "update-banner-dismiss".to_owned())
+                            .child(
+                                action_button("update-banner-dismiss")
+                                    .ghost()
+                                    .text_color(rgb(MUTED))
+                                    .child("Dispensar")
+                                    .on_click(on_dismiss),
+                            ),
+                    ),
+            ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

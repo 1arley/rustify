@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -191,34 +193,82 @@ pub(crate) fn yt_dlp_command() -> std::process::Command {
     std::process::Command::new(program)
 }
 
-fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
-    #[derive(Deserialize)]
-    struct Video {
-        id: String,
-        title: String,
-        #[serde(default)]
-        channel: Option<String>,
-        #[serde(default)]
-        uploader: Option<String>,
-        #[serde(default)]
-        duration: Option<f64>,
+#[derive(Deserialize)]
+struct YoutubeResult {
+    id: String,
+    title: String,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    album: Option<String>,
+}
+
+fn track_from_youtube_result(video: YoutubeResult) -> Option<Track> {
+    if !youtube_id(&video.id) {
+        return None;
     }
+    let artist = video.artist.unwrap_or_else(|| {
+        resolve_video_artist(
+            video.channel.as_deref(),
+            video.uploader.as_deref(),
+            &video.title,
+        )
+    });
+    let mut track = Track::from_youtube(
+        video.id,
+        video.title,
+        artist,
+        video.duration.unwrap_or_default(),
+        None,
+    );
+    if let Some(album) = video.album.filter(|album| !album.trim().is_empty()) {
+        track.genre = album;
+    }
+    Some(track)
+}
+
+fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
+    run_yt_dlp_with_flat_playlist(target, limit, true)
+}
+
+fn run_yt_dlp_with_flat_playlist(
+    target: &str,
+    limit: usize,
+    flat_playlist: bool,
+) -> Result<Vec<Track>, String> {
+    run_yt_dlp_with_flat_playlist_cancellable(target, limit, flat_playlist, None)
+}
+
+fn run_yt_dlp_with_flat_playlist_cancellable(
+    target: &str,
+    limit: usize,
+    flat_playlist: bool,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<Track>, String> {
     let limit_arg = limit.to_string();
-    let output = yt_dlp_command()
-        .args([
-            "--ignore-config",
-            "--socket-timeout",
-            "10",
-            "--retries",
-            "1",
-            "--flat-playlist",
-            "--playlist-end",
-            &limit_arg,
-            "--dump-json",
-            "--",
-            target,
-        ])
-        .output()
+    let mut command = yt_dlp_command();
+    command.args([
+        "--ignore-config",
+        "--socket-timeout",
+        "10",
+        "--retries",
+        "1",
+        "--skip-download",
+        "--playlist-end",
+        &limit_arg,
+        "--dump-json",
+    ]);
+    if flat_playlist {
+        command.arg("--flat-playlist");
+    }
+    command.args(["--", target]);
+    let output = run_command_cancellable(&mut command, cancelled)
         .map_err(|e| format!("Busca do YouTube requer yt-dlp: {e}"))?;
     if !output.status.success() {
         return Err("O YouTube não respondeu à busca.".into());
@@ -229,44 +279,125 @@ fn run_yt_dlp(target: &str, limit: usize) -> Result<Vec<Track>, String> {
         .split(|b| *b == b'\n')
         .filter(|row| !row.is_empty())
     {
-        let Ok(video) = serde_json::from_slice::<Video>(row) else {
+        let Ok(video) = serde_json::from_slice::<YoutubeResult>(row) else {
             continue;
         };
-        if youtube_id(&video.id) {
-            let artist = resolve_video_artist(
-                video.channel.as_deref(),
-                video.uploader.as_deref(),
-                &video.title,
-            );
-            tracks.push(Track::from_youtube(
-                video.id,
-                video.title,
-                artist,
-                video.duration.unwrap_or_default(),
-                None,
-            ));
+        if let Some(track) = track_from_youtube_result(video) {
+            tracks.push(track);
         }
     }
     Ok(tracks)
+}
+
+fn run_command_cancellable(
+    command: &mut Command,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Output, String> {
+    let Some(cancelled) = cancelled else {
+        return command.output().map_err(|error| error.to_string());
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Preparação cancelada.".to_owned());
+    }
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err("Preparação cancelada.".to_owned());
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    }
 }
 
 fn youtube_tracks(query: &str) -> Result<Vec<Track>, String> {
     run_yt_dlp(&format!("ytsearch12:{query}"), 12)
 }
 
+fn youtube_music_search_url(query: &str, section: &str) -> Result<String, String> {
+    let mut url =
+        Url::parse("https://music.youtube.com/search").map_err(|error| error.to_string())?;
+    url.query_pairs_mut().append_pair("q", query);
+    url.set_fragment(Some(section));
+    Ok(url.into())
+}
+
+fn youtube_music_tracks(query: &str, section: &str) -> Result<Vec<Track>, String> {
+    let url = youtube_music_search_url(query, section)?;
+    run_yt_dlp_with_flat_playlist(&url, 12, false)
+}
+
+fn prioritized_search_results(
+    songs: Vec<Track>,
+    audius: Vec<Track>,
+    videos: Vec<Track>,
+    conventional: Vec<Track>,
+) -> Vec<Track> {
+    let music = merge_search_results(songs, audius);
+    if !music.is_empty() {
+        return music;
+    }
+    if videos.is_empty() {
+        conventional
+    } else {
+        merge_search_results(videos, conventional)
+    }
+}
+
 pub(crate) fn search_all(query: &str) -> Result<Vec<Track>, String> {
     let (youtube, audius) = std::thread::scope(|scope| {
-        let youtube = scope.spawn(|| youtube_tracks(query));
+        let youtube = scope.spawn(|| youtube_music_tracks(query, "songs"));
         let audius = scope.spawn(|| search_tracks(query));
         (youtube.join(), audius.join())
     });
     let youtube = youtube.unwrap_or_else(|_| Err("A busca do YouTube falhou.".to_owned()));
     let audius = audius.unwrap_or_else(|_| Err("A busca do Audius falhou.".to_owned()));
-    match (youtube, audius) {
-        (Ok(youtube), Ok(audius)) => Ok(merge_search_results(youtube, audius)),
-        (Ok(tracks), Err(_)) | (Err(_), Ok(tracks)) => Ok(tracks),
-        (Err(youtube), Err(audius)) => Err(format!("{youtube} {audius}")),
+    let (songs, songs_error) =
+        youtube.map_or_else(|error| (Vec::new(), Some(error)), |tracks| (tracks, None));
+    let (audius, audius_error) =
+        audius.map_or_else(|error| (Vec::new(), Some(error)), |tracks| (tracks, None));
+    let music = merge_search_results(songs.clone(), audius.clone());
+    if !music.is_empty() {
+        return Ok(music);
     }
+    let (videos, videos_error) = youtube_music_tracks(query, "videos")
+        .map_or_else(|error| (Vec::new(), Some(error)), |tracks| (tracks, None));
+    if !videos.is_empty() {
+        return Ok(prioritized_search_results(
+            songs,
+            audius,
+            videos,
+            Vec::new(),
+        ));
+    }
+    let (conventional, conventional_error) = youtube_tracks(query)
+        .map_or_else(|error| (Vec::new(), Some(error)), |tracks| (tracks, None));
+    if conventional.is_empty() && songs_error.is_some() && audius_error.is_some() {
+        let mut errors = [songs_error, audius_error, videos_error, conventional_error]
+            .into_iter()
+            .flatten();
+        if let Some(error) = errors.next() {
+            return Err(errors.fold(error, |all, error| format!("{all} {error}")));
+        }
+    }
+    Ok(prioritized_search_results(
+        songs,
+        audius,
+        videos,
+        conventional,
+    ))
 }
 
 fn merge_search_results(mut tracks: Vec<Track>, incoming: Vec<Track>) -> Vec<Track> {
@@ -1231,6 +1362,25 @@ pub(crate) fn resolve_spotify_to_youtube(
     artist: &str,
     duration_micros: i64,
 ) -> Result<String, String> {
+    resolve_spotify_to_youtube_inner(title, artist, duration_micros, None)
+}
+
+pub(crate) fn resolve_spotify_to_youtube_cancellable(
+    title: &str,
+    artist: &str,
+    duration_micros: i64,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    resolve_spotify_to_youtube_inner(title, artist, duration_micros, Some(cancelled))
+}
+
+fn resolve_spotify_to_youtube_inner(
+    title: &str,
+    artist: &str,
+    duration_micros: i64,
+    cancelled: Option<&AtomicBool>,
+) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let title_t = title.trim();
     let artist_t = artist.trim();
     let query = if artist_t.is_empty() {
@@ -1243,9 +1393,68 @@ pub(crate) fn resolve_spotify_to_youtube(
     if query.is_empty() {
         return Err("Faixa sem título ou artista para buscar áudio.".to_owned());
     }
-    let candidates = run_yt_dlp(&format!("ytsearch5:{query}"), 5)?;
-    select_best_youtube_match(candidates, title_t, artist_t, duration_micros)
-        .ok_or_else(|| "Não foi possível encontrar áudio correspondente no YouTube.".to_owned())
+    let candidates = run_yt_dlp_with_flat_playlist_cancellable(
+        &format!("ytsearch5:{query}"),
+        5,
+        true,
+        cancelled,
+    )?;
+    let result = select_best_youtube_match(candidates, title_t, artist_t, duration_micros)
+        .ok_or_else(|| "Não foi possível encontrar áudio correspondente no YouTube.".to_owned());
+    eprintln!(
+        "playback identity-search: {} ms",
+        started.elapsed().as_millis()
+    );
+    result
+}
+
+/// Resolve a URL temporária de áudio para uma faixa do YouTube sem baixar o arquivo.
+pub(crate) fn youtube_media_url(video_id: &str) -> Result<String, String> {
+    youtube_media_url_inner(video_id, None)
+}
+
+pub(crate) fn youtube_media_url_cancellable(
+    video_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    youtube_media_url_inner(video_id, Some(cancelled))
+}
+
+fn youtube_media_url_inner(
+    video_id: &str,
+    cancelled: Option<&AtomicBool>,
+) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    let mut command = yt_dlp_command();
+    command
+        .args([
+            "--ignore-config",
+            "--socket-timeout",
+            "10",
+            "--retries",
+            "1",
+            "--format",
+            "ba[protocol=m3u8_native]/b[protocol=m3u8_native]/ba/b",
+            "--get-url",
+            "--",
+        ])
+        .arg(format!("https://www.youtube.com/watch?v={video_id}"));
+    let output = run_command_cancellable(&mut command, cancelled)
+        .map_err(|e| format!("Não foi possível preparar o stream: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let result = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .map(str::to_owned)
+        .ok_or_else(|| "yt-dlp não retornou uma URL de áudio válida.".to_owned());
+    eprintln!(
+        "playback media-url-extraction: {} ms",
+        started.elapsed().as_millis()
+    );
+    result
 }
 
 pub(crate) fn recommend_tracks(
@@ -1385,6 +1594,24 @@ impl TrackId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_stops_a_running_subprocess() {
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let cancel_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            signal.store(true, Ordering::Release);
+        });
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        let started = std::time::Instant::now();
+
+        assert!(run_command_cancellable(&mut command, Some(&cancelled)).is_err());
+        cancel_thread.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
     #[test]
     fn spotify_identity_survives_youtube_playback_resolution() {
         let spotify = TrackId::Spotify("source-key".into());
@@ -1511,6 +1738,72 @@ mod tests {
 
         let merged = merge_search_results(vec![youtube], vec![same_song, unique_song]);
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn youtube_music_search_url_selects_section_and_encodes_query() {
+        let url = youtube_music_search_url("Björk & friends", "songs").unwrap();
+        let url = Url::parse(&url).unwrap();
+        assert_eq!(url.host_str(), Some("music.youtube.com"));
+        assert_eq!(url.path(), "/search");
+        assert_eq!(
+            url.query_pairs().find(|(key, _)| key == "q").unwrap().1,
+            "Björk & friends"
+        );
+        assert_eq!(url.fragment(), Some("songs"));
+    }
+
+    #[test]
+    fn youtube_music_result_keeps_track_metadata_and_video_identity() {
+        let result: YoutubeResult = serde_json::from_str(
+            r#"{"id":"3hfSwkmp_BM","title":"Declaração de Guerra (Bleach)","artist":"Basara, 7 Minutoz, AniRap","album":"Declaração de Guerra (Bleach)","duration":630}"#,
+        )
+        .unwrap();
+        let track = track_from_youtube_result(result).unwrap();
+        assert_eq!(track.id, TrackId::Youtube("3hfSwkmp_BM".into()));
+        assert_eq!(track.artist_names(), "Basara, 7 Minutoz, AniRap");
+        assert_eq!(track.album_name(), "Declaração de Guerra (Bleach)");
+        assert_eq!(track.duration, 630.0);
+        assert_eq!(
+            track.stream_url(),
+            "https://www.youtube.com/watch?v=3hfSwkmp_BM"
+        );
+    }
+
+    #[test]
+    fn prioritized_search_uses_music_before_video_fallbacks() {
+        let song = yt_track("abcdefghijk", "Song", "Artist", 180.0);
+        let mut audius = yt_track("lmnopqrstuv", "Other", "Artist", 180.0);
+        audius.id = TrackId::Audius("audius123".into());
+        let video = yt_track("zyxwvutsrqp", "Video", "Artist", 180.0);
+        let conventional = yt_track("12345678901", "Conventional", "Artist", 180.0);
+
+        let results = prioritized_search_results(
+            vec![song.clone()],
+            vec![audius],
+            vec![video.clone()],
+            vec![conventional.clone()],
+        );
+        assert_eq!(results[0].id, song.id);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1].id, TrackId::Audius("audius123".into()));
+
+        let results = prioritized_search_results(
+            Vec::new(),
+            Vec::new(),
+            vec![video.clone()],
+            vec![video.clone(), conventional.clone()],
+        );
+        assert_eq!(results[0].id, video.id);
+        assert_eq!(results.len(), 2);
+
+        let results = prioritized_search_results(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![conventional.clone()],
+        );
+        assert_eq!(results[0].id, conventional.id);
     }
 
     #[test]

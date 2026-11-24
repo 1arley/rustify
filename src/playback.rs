@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -106,6 +107,17 @@ enum Request {
         generation: u64,
         items: Result<Vec<PlaybackItem>, String>,
     },
+    Prepared {
+        generation: u64,
+        revision: u64,
+        entry_id: u64,
+        result: Result<String, String>,
+    },
+    IdentityResolved {
+        generation: u64,
+        entry_id: u64,
+        result: Result<String, String>,
+    },
 }
 
 struct Player {
@@ -192,10 +204,57 @@ fn engine() -> Result<Mpv, String> {
     })
     .map_err(|e| e.to_string())
 }
+fn standby_engine(url: &str, volume: f64) -> Result<Mpv, String> {
+    let mpv = Mpv::with_initializer(|init| {
+        init.set_option("vid", "no")?;
+        init.set_option("pause", true)?;
+        init.set_option("cache", true)?;
+        init.set_option("cache-on-disk", false)?;
+        init.set_option("cache-secs", 5)?;
+        init.set_option("demuxer-cache-wait", true)
+    })
+    .map_err(|error| error.to_string())?;
+    mpv.set_property("volume", volume)
+        .map_err(|error| error.to_string())?;
+    mpv.command("loadfile", &[url, "replace"])
+        .map_err(|error| error.to_string())?;
+    Ok(mpv)
+}
 fn load(mpv: &Mpv, url: &str) -> Result<(), String> {
     mpv.command("loadfile", &[url, "replace"])
         .and_then(|_| mpv.set_property("pause", false))
         .map_err(|e| e.to_string())
+}
+
+fn accepts_preparation(
+    generation: u64,
+    revision: u64,
+    entry_id: u64,
+    current_generation: u64,
+    current_revision: u64,
+    planned_next: Option<(u64, u64)>,
+    playing: bool,
+) -> bool {
+    playing
+        && generation == current_generation
+        && revision == current_revision
+        && planned_next == Some((revision, entry_id))
+}
+
+fn preloaded_next(
+    ready: bool,
+    preloaded: Option<(u64, u64)>,
+    revision: u64,
+    queue: &Queue,
+) -> Option<u64> {
+    if !ready {
+        return None;
+    }
+    preloaded
+        .filter(|(prepared_revision, id)| {
+            *prepared_revision == revision && queue.entries.iter().any(|entry| entry.id == *id)
+        })
+        .map(|(_, id)| id)
 }
 
 #[derive(PartialEq, Eq)]
@@ -223,6 +282,18 @@ struct Worker {
     pending_seek: Option<i64>,
     last_persisted_session: Option<PlaybackSession>,
     last_session_save: Instant,
+    queue_revision: u64,
+    prepare_generation: u64,
+    preparing: bool,
+    planned_next: Option<(u64, u64)>,
+    preparation_cancel: Option<Arc<AtomicBool>>,
+    preloaded: Option<(u64, u64)>,
+    preloader: Option<Mpv>,
+    preloader_ready: bool,
+    preloader_started: Option<Instant>,
+    direct_preloaded: bool,
+    identity_resolving: bool,
+    loading_since: Option<Instant>,
 }
 impl Worker {
     fn maybe_request_suggestions(&mut self) {
@@ -268,6 +339,16 @@ impl Worker {
         });
     }
     fn start(&mut self, automatic: bool) {
+        self.prepare_generation += 1;
+        if let Some(cancelled) = &self.preparation_cancel {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.planned_next = None;
+        self.preloaded = None;
+        self.preloader = None;
+        self.preloader_ready = false;
+        self.preloader_started = None;
+        self.direct_preloaded = false;
         self.automatic = automatic;
         if !automatic {
             self.notice = None;
@@ -286,6 +367,7 @@ impl Worker {
                 });
             }
             self.phase = Phase::Loading;
+            self.loading_since = Some(Instant::now());
             self.publish();
 
             if let TrackId::Spotify(sp_key) = self.queue.entries[index].item.track_id.clone() {
@@ -293,36 +375,35 @@ impl Worker {
                 let artist = self.queue.entries[index].item.artist.clone();
                 let duration = self.queue.entries[index].item.duration;
 
-                let resolved = match crate::library::lookup_resolved_youtube_id(&sp_key) {
-                    Some(yt_id) => Ok(yt_id),
-                    None => {
-                        match crate::catalog::resolve_spotify_to_youtube(&title, &artist, duration)
-                        {
-                            Ok(yt_id) => {
-                                crate::library::record_resolved_youtube_id(&sp_key, &yt_id);
-                                Ok(yt_id)
-                            }
-                            Err(err) => Err(err),
-                        }
+                let Some(yt_id) = crate::library::lookup_resolved_youtube_id(&sp_key) else {
+                    if self.identity_resolving {
+                        return;
                     }
+                    let generation = self.prepare_generation;
+                    let entry_id = self.queue.entries[index].id;
+                    let sender = self.sender.clone();
+                    self.identity_resolving = true;
+                    thread::spawn(move || {
+                        let result =
+                            crate::catalog::resolve_spotify_to_youtube(&title, &artist, duration);
+                        if let Ok(yt_id) = &result {
+                            crate::library::record_resolved_youtube_id(&sp_key, yt_id);
+                        }
+                        let _ = sender.send(Request::IdentityResolved {
+                            generation,
+                            entry_id,
+                            result,
+                        });
+                    });
+                    return;
                 };
 
-                match resolved {
-                    Ok(yt_id) => {
-                        let new_id = TrackId::Youtube(yt_id);
-                        self.queue.entries[index].item.track_id = new_id.clone();
-                        if let Some(seed) = &mut self.queue.seed
-                            && seed.track_id == TrackId::Spotify(sp_key)
-                        {
-                            seed.track_id = new_id;
-                        }
-                    }
-                    Err(err) => {
-                        if !self.fail(err) {
-                            return;
-                        }
-                        continue;
-                    }
+                let new_id = TrackId::Youtube(yt_id);
+                self.queue.entries[index].item.track_id = new_id.clone();
+                if let Some(seed) = &mut self.queue.seed
+                    && seed.track_id == TrackId::Spotify(sp_key)
+                {
+                    seed.track_id = new_id;
                 }
             }
 
@@ -330,7 +411,13 @@ impl Worker {
             let result = self.engine.as_ref().map_err(Clone::clone).and_then(|mpv| {
                 mpv.set_property("volume", self.volume)
                     .map_err(|e| e.to_string())?;
-                load(mpv, &stream_url)
+                let opened_at = Instant::now();
+                load(mpv, &stream_url).map(|()| {
+                    eprintln!(
+                        "playback loadfile-call: {} ms",
+                        opened_at.elapsed().as_millis()
+                    );
+                })
             });
             match result {
                 Ok(()) => {
@@ -346,6 +433,63 @@ impl Worker {
             }
         }
     }
+    fn prepare_next(&mut self) {
+        if self.preparing
+            || self.phase != Phase::Started
+            || self.preloader.is_some()
+            || self.planned_next.is_some()
+        {
+            return;
+        }
+        let Some(entry_id) = self.queue.next(true) else {
+            self.planned_next = None;
+            return;
+        };
+        let Some(entry) = self.queue.entries.iter().find(|entry| entry.id == entry_id) else {
+            return;
+        };
+        let item = entry.item.clone();
+        let revision = self.queue_revision;
+        self.planned_next = Some((revision, entry_id));
+        let generation = self.prepare_generation;
+        let sender = self.sender.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.preparation_cancel = Some(cancelled.clone());
+        self.preparing = true;
+        thread::spawn(move || {
+            let cancel = cancelled.as_ref();
+            let result = (|| {
+                let video_id = match item.track_id {
+                    TrackId::Youtube(id) => id,
+                    TrackId::Spotify(key) => {
+                        let id = match crate::library::lookup_resolved_youtube_id(&key) {
+                            Some(id) => id,
+                            None => crate::catalog::resolve_spotify_to_youtube_cancellable(
+                                &item.title,
+                                &item.artist,
+                                item.duration,
+                                cancel,
+                            )?,
+                        };
+                        crate::library::record_resolved_youtube_id(&key, &id);
+                        id
+                    }
+                    TrackId::Audius(_) => {
+                        return Err(
+                            "Formato de áudio não suportado pelo pré-carregamento.".to_owned()
+                        );
+                    }
+                };
+                crate::catalog::youtube_media_url_cancellable(&video_id, cancel)
+            })();
+            let _ = sender.send(Request::Prepared {
+                generation,
+                revision,
+                entry_id,
+                result,
+            });
+        });
+    }
     fn fail(&mut self, error: String) -> bool {
         let title = &self.queue.entries[self.queue.index().expect("selected occurrence")]
             .item
@@ -360,9 +504,50 @@ impl Worker {
         }
         false
     }
+    fn invalidate_preload(&mut self) {
+        self.prepare_generation += 1;
+        if let Some(cancelled) = &self.preparation_cancel {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.planned_next = None;
+        self.preloaded = None;
+        self.preloader = None;
+        self.preloader_ready = false;
+        self.preloader_started = None;
+    }
     fn advance(&mut self, eof: bool) -> Result<(), String> {
         self.queue.completed();
-        if let Some(next) = self.queue.next(eof) {
+        let preloaded = preloaded_next(
+            self.preloader_ready,
+            eof.then(|| self.preloaded.take()).flatten(),
+            self.queue_revision,
+            &self.queue,
+        );
+        if let Some(next) = preloaded {
+            self.resume_position = 0;
+            self.pending_seek = None;
+            self.queue.selected = Some(next);
+            self.phase = Phase::Loading;
+            self.loading_since = Some(Instant::now());
+            self.preloader_ready = false;
+            self.planned_next = None;
+            self.direct_preloaded = true;
+            self.automatic = true;
+            if let Some(preloader) = self.preloader.take() {
+                self.engine = Ok(preloader);
+                let mpv = self.mpv()?;
+                if mpv
+                    .set_property("volume", self.volume)
+                    .and_then(|()| mpv.set_property("pause", false))
+                    .is_err()
+                {
+                    self.start(true);
+                }
+            } else {
+                self.start(true);
+            }
+            eprintln!("playback transition: prepared entry {next}");
+        } else if let Some(next) = self.queue.next(eof) {
             self.resume_position = 0;
             self.pending_seek = None;
             self.queue.selected = Some(next);
@@ -381,7 +566,38 @@ impl Worker {
     fn mpv(&self) -> Result<&Mpv, String> {
         self.engine.as_ref().map_err(Clone::clone)
     }
+    fn poll_preloader(&mut self) {
+        loop {
+            let event = self.preloader.as_ref().and_then(|mpv| mpv.wait_event(0.));
+            let status = match event {
+                Some(Ok(Event::FileLoaded)) => 1,
+                Some(Ok(Event::EndFile(_))) => 2,
+                Some(Err(error)) => {
+                    eprintln!("playback standby failed: {error}");
+                    2
+                }
+                Some(_) => continue,
+                None => return,
+            };
+            if status == 1 {
+                self.preloader_ready = true;
+                if let Some(started) = self.preloader_started.take() {
+                    eprintln!(
+                        "playback standby-ready: {} ms",
+                        started.elapsed().as_millis()
+                    );
+                }
+                return;
+            }
+            self.preloader = None;
+            self.preloader_ready = false;
+            self.preloader_started = None;
+            self.preloaded = None;
+            return;
+        }
+    }
     fn poll(&mut self) {
+        self.poll_preloader();
         loop {
             let Some(event) = self.mpv().ok().and_then(|mpv| mpv.wait_event(0.)) else {
                 return;
@@ -395,6 +611,14 @@ impl Worker {
                         .unwrap_or(true);
                     if !paused {
                         self.phase = Phase::Started;
+                        if let Some(started_at) = self.loading_since.take() {
+                            let elapsed = started_at.elapsed().as_millis();
+                            if self.direct_preloaded {
+                                eprintln!("playback transition-start: {elapsed} ms");
+                            } else {
+                                eprintln!("playback stream-start: {elapsed} ms");
+                            }
+                        }
                         self.queue.started();
                         if let Some(position) = self.pending_seek.take() {
                             let seconds = (position as f64 / 1_000_000.0).to_string();
@@ -402,6 +626,8 @@ impl Worker {
                                 let _ = mpv.command("seek", &[&seconds, "absolute"]);
                             }
                         }
+                        self.planned_next = None;
+                        self.prepare_next();
                     }
                 }
                 Ok(Event::EndFile(libmpv::mpv_end_file_reason::Eof))
@@ -409,15 +635,29 @@ impl Worker {
                 {
                     let _ = self.advance(true);
                 }
+                Ok(Event::EndFile(reason))
+                    if reason != libmpv::mpv_end_file_reason::Eof
+                        && self.phase == Phase::Started
+                        && self.direct_preloaded =>
+                {
+                    self.start(true);
+                }
                 Ok(Event::EndFile(libmpv::mpv_end_file_reason::Eof))
-                    if self.phase == Phase::Loading =>
+                    if self.phase == Phase::Loading && !self.direct_preloaded =>
                 {
                     if self.fail("A faixa terminou antes de iniciar.".into()) {
                         self.start(true);
                     }
                 }
+                Ok(Event::EndFile(_reason))
+                    if self.phase == Phase::Loading && self.direct_preloaded =>
+                {
+                    self.start(true);
+                }
                 Err(e) if matches!(self.phase, Phase::Started | Phase::Loading) => {
-                    if self.fail(e.to_string()) {
+                    if self.direct_preloaded {
+                        self.start(true);
+                    } else if self.fail(e.to_string()) {
                         self.start(true);
                     }
                 }
@@ -428,6 +668,7 @@ impl Worker {
     fn command(&mut self, command: PlaybackCommand) -> Result<(), String> {
         match command {
             PlaybackCommand::Select(id) => {
+                self.queue_revision += 1;
                 self.resume_position = 0;
                 self.pending_seek = None;
                 self.queue.select(id)?;
@@ -473,20 +714,29 @@ impl Worker {
             }
             PlaybackCommand::Next => self.advance(false),
             PlaybackCommand::Shuffle => {
+                self.queue_revision += 1;
+                self.invalidate_preload();
                 self.queue.shuffle = !self.queue.shuffle;
+                self.prepare_next();
                 Ok(())
             }
             PlaybackCommand::Repeat => {
+                self.queue_revision += 1;
+                self.invalidate_preload();
                 self.queue.repeat = self.queue.repeat.cycle();
                 self.maybe_request_suggestions();
+                self.prepare_next();
                 Ok(())
             }
             PlaybackCommand::RefreshSuggestions => {
                 self.generation += 1;
+                self.queue_revision += 1;
+                self.invalidate_preload();
                 self.suggesting = false;
                 self.exhausted_at_len = None;
                 self.queue.clear_upcoming_suggestions();
                 self.maybe_request_suggestions();
+                self.prepare_next();
                 Ok(())
             }
             PlaybackCommand::SeekPercent(value) => self
@@ -588,6 +838,13 @@ impl Worker {
         }
     }
 }
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if let Some(cancelled) = &self.preparation_cancel {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+}
 fn run_player(
     receiver: mpsc::Receiver<Request>,
     sender: mpsc::Sender<Request>,
@@ -624,12 +881,26 @@ fn run_player(
         pending_seek: None,
         last_persisted_session: None,
         last_session_save: Instant::now(),
+        queue_revision: 0,
+        prepare_generation: 0,
+        preparing: false,
+        planned_next: None,
+        preparation_cancel: None,
+        preloaded: None,
+        preloader: None,
+        preloader_ready: false,
+        preloader_started: None,
+        direct_preloaded: false,
+        identity_resolving: false,
+        loading_since: None,
     };
     worker.publish();
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(Request::Play(items, index, reply)) => {
                 worker.generation += 1;
+                worker.queue_revision += 1;
+                worker.invalidate_preload();
                 worker.suggesting = false;
                 worker.exhausted_at_len = None;
                 worker.resume_position = 0;
@@ -642,6 +913,9 @@ fn run_player(
             Ok(Request::Queue(command, reply)) => {
                 let res = worker.queue.edit(command);
                 if res.is_ok() {
+                    worker.queue_revision += 1;
+                    worker.invalidate_preload();
+                    worker.prepare_next();
                     worker.maybe_request_suggestions();
                 }
                 let _ = reply.send(res);
@@ -658,7 +932,10 @@ fn run_player(
                             if added == 0 {
                                 worker.exhausted_at_len = Some(worker.queue.entries.len());
                             } else {
+                                worker.queue_revision += 1;
+                                worker.invalidate_preload();
                                 worker.exhausted_at_len = None;
+                                worker.prepare_next();
                                 if worker.phase == Phase::Ended {
                                     let _ = worker.advance(true);
                                 }
@@ -668,6 +945,80 @@ fn run_player(
                             worker.exhausted_at_len = Some(worker.queue.entries.len());
                         }
                     }
+                }
+            }
+            Ok(Request::Prepared {
+                generation,
+                revision,
+                entry_id,
+                result,
+            }) => {
+                worker.preparing = false;
+                worker.preparation_cancel = None;
+                if accepts_preparation(
+                    generation,
+                    revision,
+                    entry_id,
+                    worker.prepare_generation,
+                    worker.queue_revision,
+                    worker.planned_next,
+                    worker.phase == Phase::Started,
+                ) {
+                    match result {
+                        Ok(url) => match standby_engine(&url, worker.volume) {
+                            Ok(mpv) => {
+                                worker.preloaded = Some((revision, entry_id));
+                                worker.preloader = Some(mpv);
+                                worker.preloader_ready = false;
+                                worker.preloader_started = Some(Instant::now());
+                            }
+                            Err(error) => eprintln!("playback standby setup failed: {error}"),
+                        },
+                        Err(error) => eprintln!("playback prefetch failed: {error}"),
+                    }
+                }
+                worker.prepare_next();
+            }
+            Ok(Request::IdentityResolved {
+                generation,
+                entry_id,
+                result,
+            }) => {
+                worker.identity_resolving = false;
+                if generation == worker.prepare_generation
+                    && worker.queue.selected == Some(entry_id)
+                    && worker.phase == Phase::Loading
+                {
+                    match result {
+                        Ok(yt_id) => {
+                            if let Some(index) = worker.queue.index() {
+                                worker.queue.entries[index].item.track_id = TrackId::Youtube(yt_id);
+                                if let Some(seed) = &mut worker.queue.seed
+                                    && matches!(seed.track_id, TrackId::Spotify(_))
+                                {
+                                    seed.track_id =
+                                        worker.queue.entries[index].item.track_id.clone();
+                                }
+                                let automatic = worker.automatic;
+                                worker.start(automatic);
+                            }
+                        }
+                        Err(error) => {
+                            if worker.fail(error) {
+                                worker.start(true);
+                            }
+                        }
+                    }
+                } else if worker.phase == Phase::Loading
+                    && worker.queue.index().is_some_and(|index| {
+                        matches!(
+                            worker.queue.entries[index].item.track_id,
+                            TrackId::Spotify(_)
+                        )
+                    })
+                {
+                    let automatic = worker.automatic;
+                    worker.start(automatic);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -680,6 +1031,240 @@ fn run_player(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn worker_for_test() -> Worker {
+        Worker {
+            queue: Queue::default(),
+            engine: engine(),
+            phase: Phase::Started,
+            automatic: false,
+            notice: None,
+            volume: 0.,
+            sender: mpsc::channel().0,
+            state: Arc::new(Mutex::new(PlaybackState::default())),
+            generation: 0,
+            suggesting: false,
+            exhausted_at_len: None,
+            resume_position: 0,
+            pending_seek: None,
+            last_persisted_session: None,
+            last_session_save: Instant::now(),
+            queue_revision: 0,
+            prepare_generation: 0,
+            preparing: false,
+            planned_next: None,
+            preparation_cancel: None,
+            preloaded: None,
+            preloader: None,
+            preloader_ready: false,
+            preloader_started: None,
+            direct_preloaded: false,
+            identity_resolving: false,
+            loading_since: None,
+        }
+    }
+
+    fn test_item(id: &str) -> PlaybackItem {
+        PlaybackItem {
+            track_id: id.to_owned().try_into().unwrap(),
+            title: id.into(),
+            artist: String::new(),
+            artwork_url: None,
+            duration: 1_000_000,
+        }
+    }
+
+    fn wait_for_file_loaded(mpv: &Mpv) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match mpv.wait_event(0.05) {
+                Some(Ok(Event::FileLoaded)) => return,
+                Some(Err(error)) => panic!("preloaded stream failed: {error}"),
+                _ => {}
+            }
+        }
+        panic!("standby mpv did not load the stream in time");
+    }
+
+    #[test]
+    fn stale_prefetches_are_rejected_after_selection_or_queue_changes() {
+        assert!(accepts_preparation(4, 8, 11, 4, 8, Some((8, 11)), true));
+        assert!(!accepts_preparation(3, 8, 11, 4, 8, Some((8, 11)), true));
+        assert!(!accepts_preparation(4, 7, 11, 4, 8, Some((8, 11)), true));
+        assert!(!accepts_preparation(4, 8, 12, 4, 8, Some((8, 11)), true));
+        assert!(!accepts_preparation(4, 8, 11, 4, 8, Some((8, 11)), false));
+    }
+
+    #[test]
+    fn transition_uses_the_preselected_queue_entry_and_discards_stale_urls() {
+        let item = PlaybackItem {
+            track_id: "abc".to_string().try_into().unwrap(),
+            title: "A".into(),
+            artist: String::new(),
+            artwork_url: None,
+            duration: 0,
+        };
+        let mut queue = Queue::default();
+        queue.replace(vec![item.clone(), item], 0);
+        let next = queue.entries[1].id;
+
+        assert_eq!(preloaded_next(true, Some((5, next)), 5, &queue), Some(next));
+        assert_eq!(preloaded_next(true, Some((4, next)), 5, &queue), None);
+        assert_eq!(preloaded_next(false, Some((5, next)), 5, &queue), None);
+        queue.entries.remove(1);
+        assert_eq!(preloaded_next(true, Some((5, next)), 5, &queue), None);
+    }
+
+    #[test]
+    fn queue_invalidation_allows_preparing_the_revised_next_entry() {
+        let mut worker = worker_for_test();
+        let mut current = test_item("abc");
+        let mut next = test_item("def");
+        current.track_id = TrackId::Audius("current".into());
+        next.track_id = TrackId::Audius("next".into());
+        worker.queue.replace(vec![current, next], 0);
+        let next_id = worker.queue.entries[1].id;
+        worker.planned_next = Some((0, next_id));
+        worker.preloaded = Some((0, next_id));
+
+        worker.queue_revision += 1;
+        worker.invalidate_preload();
+        worker.prepare_next();
+
+        assert_eq!(worker.planned_next, Some((worker.queue_revision, next_id)));
+        assert!(worker.preparing);
+    }
+
+    #[test]
+    fn refreshing_suggestions_replans_a_remaining_manual_next_entry() {
+        let mut worker = worker_for_test();
+        let mut current = test_item("abc");
+        let mut next = test_item("def");
+        current.track_id = TrackId::Audius("current".into());
+        next.track_id = TrackId::Audius("next".into());
+        worker.queue.replace(vec![current, next], 0);
+        worker.queue.repeat = crate::queue::Repeat::Playlist;
+        let next_id = worker.queue.entries[1].id;
+
+        worker.command(PlaybackCommand::RefreshSuggestions).unwrap();
+
+        assert_eq!(worker.planned_next, Some((worker.queue_revision, next_id)));
+        assert!(worker.preparing);
+    }
+
+    #[test]
+    fn prepared_stream_is_loaded_paused_then_promoted_for_transition() {
+        let mut worker = worker_for_test();
+        worker
+            .queue
+            .replace(vec![test_item("abc"), test_item("def")], 0);
+        worker.exhausted_at_len = Some(worker.queue.entries.len());
+        let next = worker.queue.entries[1].id;
+        let standby = standby_engine("av://lavfi:anullsrc=d=1", 0.).unwrap();
+        wait_for_file_loaded(&standby);
+        assert!(standby.get_property::<bool>("pause").unwrap());
+
+        worker.preloaded = Some((worker.queue_revision, next));
+        worker.preloader_ready = true;
+        worker.preloader = Some(standby);
+        worker.advance(true).unwrap();
+        assert_eq!(worker.queue.selected, Some(next));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while worker.phase == Phase::Loading && Instant::now() < deadline {
+            worker.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker.phase == Phase::Started);
+    }
+
+    #[test]
+    fn failed_promoted_track_keeps_automatic_queue_advance() {
+        let mut worker = worker_for_test();
+        worker.queue.replace(
+            vec![test_item("abc"), test_item("def"), test_item("ghi")],
+            0,
+        );
+        worker.exhausted_at_len = Some(worker.queue.entries.len());
+        let next = worker.queue.entries[1].id;
+        let standby = standby_engine("av://lavfi:anullsrc=d=1", 0.).unwrap();
+        wait_for_file_loaded(&standby);
+        worker.preloaded = Some((worker.queue_revision, next));
+        worker.preloader_ready = true;
+        worker.preloader = Some(standby);
+
+        worker.advance(true).unwrap();
+        assert!(worker.automatic);
+        assert!(worker.fail("preloaded stream failed".into()));
+        assert_eq!(worker.queue.selected, Some(worker.queue.entries[2].id));
+    }
+
+    #[test]
+    fn midtrack_failure_of_a_promoted_stream_retries_through_track_url() {
+        let mut worker = worker_for_test();
+        let mut current = test_item("abc");
+        let mut next = test_item("def");
+        current.track_id = TrackId::Audius("current".into());
+        next.track_id = TrackId::Audius("next".into());
+        worker.queue.replace(vec![current, next], 0);
+        worker.exhausted_at_len = Some(worker.queue.entries.len());
+        let next_id = worker.queue.entries[1].id;
+        let standby = standby_engine("av://lavfi:anullsrc=d=10", 0.).unwrap();
+        wait_for_file_loaded(&standby);
+        worker.preloaded = Some((worker.queue_revision, next_id));
+        worker.preloader_ready = true;
+        worker.preloader = Some(standby);
+        worker.advance(true).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while worker.phase == Phase::Loading && Instant::now() < deadline {
+            worker.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker.phase == Phase::Started);
+        assert!(worker.direct_preloaded);
+
+        worker.mpv().unwrap().command("stop", &[]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while worker.phase == Phase::Started && Instant::now() < deadline {
+            worker.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(worker.phase == Phase::Loading);
+        assert!(worker.automatic);
+        assert!(!worker.direct_preloaded);
+    }
+
+    #[test]
+    fn failed_standby_stream_leaves_current_playback_running() {
+        let mut worker = worker_for_test();
+        worker
+            .queue
+            .replace(vec![test_item("abc"), test_item("def")], 0);
+        worker.preloaded = Some((worker.queue_revision, worker.queue.entries[1].id));
+        let missing =
+            std::env::temp_dir().join(format!("rustify-missing-{}", rand::random::<u64>()));
+        worker.preloader = Some(standby_engine(missing.to_string_lossy().as_ref(), 0.).unwrap());
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while worker.preloader.is_some() && Instant::now() < deadline {
+            worker.poll_preloader();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker.preloader.is_none());
+        assert!(worker.phase == Phase::Started);
+        assert_eq!(worker.queue.index(), Some(0));
+    }
+
+    #[test]
+    #[ignore = "consulta o YouTube e abre uma URL temporária pelo libmpv"]
+    fn youtube_standby_loads_the_direct_stream_while_paused() {
+        let url = crate::catalog::youtube_media_url("5NV6Rdv1a3I").unwrap();
+        let mpv = standby_engine(&url, 0.).unwrap();
+        wait_for_file_loaded(&mpv);
+        assert!(mpv.get_property::<bool>("pause").unwrap());
+    }
 
     #[test]
     #[ignore = "consulta o YouTube e reproduz áudio pelo libmpv"]
@@ -732,6 +1317,18 @@ mod tests {
             pending_seek: None,
             last_persisted_session: None,
             last_session_save: Instant::now(),
+            queue_revision: 0,
+            prepare_generation: 0,
+            preparing: false,
+            planned_next: None,
+            preparation_cancel: None,
+            preloaded: None,
+            preloader: None,
+            preloader_ready: false,
+            preloader_started: None,
+            direct_preloaded: false,
+            identity_resolving: false,
+            loading_since: None,
         };
         worker.queue.replace(vec![item.clone(), item], 0);
         load(worker.mpv().unwrap(), "/dev/null").unwrap();

@@ -6,6 +6,7 @@ on:
       - main
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -27,6 +28,8 @@ jobs:
 
       - name: Commit, tag, and push
         if: steps.bump.outputs.bump != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -35,3 +38,4 @@ jobs:
           git tag "v${{ steps.bump.outputs.version }}"
           git push origin HEAD:main
           git push origin "v${{ steps.bump.outputs.version }}"
+          gh workflow run release.yml --ref "v${{ steps.bump.outputs.version }}"

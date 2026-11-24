@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: @WINGET_ID@
+PackageVersion: @VERSION@
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: rustify.exe
+    PortableCommandAlias: rustify
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/1arley/rustify/releases/download/v@VERSION@/rustify-windows-x86_64.zip
+    InstallerSha256: @WINDOWS_SHA256_UPPER@
+ManifestType: installer
+ManifestVersion: 1.6.0

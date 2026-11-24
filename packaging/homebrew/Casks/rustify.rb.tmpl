@@ -1,0 +1,24 @@
+cask "@HOMEBREW_TOKEN@" do
+  version "@VERSION@"
+  sha256 "@MACOS_SHA256@"
+
+  url "https://github.com/1arley/rustify/releases/download/v#{version}/rustify-macos-aarch64.tar.gz"
+  name "Rustify"
+  desc "Native desktop music player built with Rust, GPUI, and libmpv"
+  homepage "https://github.com/1arley/rustify"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on arch: :arm64
+  depends_on formula: "mpv"
+
+  binary "rustify-macos-aarch64/rustify"
+
+  caveats <<~EOS
+    Rustify is not notarized yet. If macOS blocks the first launch, run:
+      xattr -dr com.apple.quarantine "$(brew --caskroom)/@HOMEBREW_TOKEN@"
+  EOS
+end

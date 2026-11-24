@@ -97,6 +97,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/rustify" "stage/$name/rustify.bin"
           curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
           chmod +x "stage/$name/rustify.bin" "stage/$name/${{ matrix.ytdlp_name }}"
+          cp LICENSE "stage/$name/LICENSE"
 
           if [ "${{ runner.os }}" = "Linux" ]; then
             # Bundle libmpv and most non-glibc shared libs for portability.
@@ -157,6 +158,7 @@ jobs:
           name="rustify-windows-x86_64"
           mkdir -p "stage/$name" dist
           cp "target/${{ matrix.target }}/release/rustify.exe" "stage/$name/"
+          cp LICENSE "stage/$name/LICENSE"
           curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
           # Bundle required MSYS2/UCRT64 DLLs so users don't need to install mpv.
           cat > /tmp/bundle_dlls.py << 'PY'
@@ -219,11 +221,199 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum rustify-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload checksums for package jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/SHA256SUMS.txt
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Package channels run after the GitHub release exists and never block it.
+  package-manifests:
+    needs: publish
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: checksums
+          path: checksums
+
+      - name: Check package name collisions (read-only)
+        run: python3 scripts/check_package_names.py
+
+      - name: Render package files
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          fi
+          python3 scripts/render_packaging.py \
+            --version "$version" \
+            --checksums-file checksums/SHA256SUMS.txt \
+            --aur-pkgname "${{ vars.AUR_PKGNAME || 'rustify-bin' }}" \
+            --out-dir dist-packaging
+
+      - name: Upload rendered package files
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-manifests
+          path: dist-packaging
+
+  publish-aur:
+    needs: package-manifests
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Download rendered package files
+        uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: dist-packaging
+
+      - name: Generate .SRCINFO
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist-packaging/aur:/pkg" archlinux:base-devel bash -euc '
+            useradd -m builder
+            chown -R builder /pkg
+            su builder -c "cd /pkg && makepkg --printsrcinfo > .SRCINFO"
+          '
+          chmod -R a+rX dist-packaging/aur
+          grep -q '^pkgbase = ' dist-packaging/aur/.SRCINFO
+
+      - name: Push to AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_PKGNAME: ${{ vars.AUR_PKGNAME || 'rustify-bin' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_KEY:-}" ]; then
+            echo "::notice::AUR_SSH_KEY not configured; skipping AUR publish."
+            exit 0
+          fi
+          install -d -m700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone "ssh://aur@aur.archlinux.org/${AUR_PKGNAME}.git" aur-repo
+          cp dist-packaging/aur/PKGBUILD dist-packaging/aur/.SRCINFO aur-repo/
+          cd aur-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR package already up to date."
+            exit 0
+          fi
+          git commit -m "chore: update to ${GITHUB_REF_NAME}"
+          git push origin HEAD:master
+
+  publish-homebrew:
+    needs: package-manifests
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Download rendered package files
+        uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: dist-packaging
+
+      - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || '1arley/homebrew-tap' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN not configured; skipping Homebrew publish."
+            exit 0
+          fi
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
+          mkdir -p tap/Casks
+          cp dist-packaging/homebrew/Casks/*.rb tap/Casks/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks
+          if git diff --cached --quiet; then
+            echo "Tap already up to date."
+            exit 0
+          fi
+          git commit -m "rustify ${GITHUB_REF_NAME}"
+          git push
+
+  publish-winget:
+    needs: package-manifests
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Download rendered package files
+        uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: dist-packaging
+
+      - name: Open winget-pkgs pull request
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::WINGET_GITHUB_TOKEN not configured; skipping Winget publish."
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          user="$(gh api user -q .login)"
+          gh repo fork microsoft/winget-pkgs --clone=false || true
+          gh repo sync "${user}/winget-pkgs" --source microsoft/winget-pkgs || true
+          git clone --depth 1 --filter=blob:none --sparse \
+            "https://x-access-token:${GH_TOKEN}@github.com/${user}/winget-pkgs.git" winget-pkgs
+          cd winget-pkgs
+          git sparse-checkout set manifests/1/1arley
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch="1arley.Rustify-${version}"
+          git checkout -B "$branch"
+          cp -r ../dist-packaging/winget/manifests/. manifests/
+          git add manifests
+          if git diff --cached --quiet; then
+            echo "Manifests already up to date."
+            exit 0
+          fi
+          if gh api repos/microsoft/winget-pkgs/contents/manifests/1/1arley/Rustify >/dev/null 2>&1; then
+            title="New version: 1arley.Rustify version ${version}"
+          else
+            title="New package: 1arley.Rustify version ${version}"
+          fi
+          git commit -m "$title"
+          git push --force origin "$branch"
+          gh pr create --repo microsoft/winget-pkgs \
+            --head "${user}:${branch}" --base master \
+            --title "$title" \
+            --body "Automated submission from the Rustify release workflow." \
+            || echo "Pull request already exists or could not be created."
 
   publish-crate:
     runs-on: ubuntu-latest

@@ -1,0 +1,49 @@
+# Maintainer: 1arley <https://github.com/1arley>
+# Rendered by scripts/render_packaging.py from packaging/aur/PKGBUILD.tmpl.
+pkgname=@AUR_PKGNAME@
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Native desktop music player built with Rust, GPUI, and libmpv (official prebuilt release)"
+arch=('x86_64')
+url="https://github.com/1arley/rustify"
+license=('MIT')
+# The release archive bundles libmpv, its libraries and yt-dlp under one folder.
+depends=('glibc' 'gcc-libs' 'bash' 'hicolor-icon-theme')
+optdepends=('mpv: system libmpv if the bundled libraries fail on your setup')
+provides=('rustify')
+conflicts=('rustify')
+options=('!strip' '!debug')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/1arley/rustify/releases/download/v${pkgver}/rustify-linux-x86_64.tar.gz")
+sha256sums=('@LINUX_SHA256@')
+
+package() {
+  cd "${srcdir}/rustify-linux-x86_64"
+
+  # Keep binary, bundled yt-dlp and libs together: Rustify looks for yt-dlp
+  # next to its executable. Not installed to /usr/bin to avoid clashing with
+  # the Arch yt-dlp package.
+  install -dm755 "${pkgdir}/opt/rustify"
+  install -Dm755 rustify.bin "${pkgdir}/opt/rustify/rustify.bin"
+  install -Dm755 yt-dlp "${pkgdir}/opt/rustify/yt-dlp"
+  cp -a lib "${pkgdir}/opt/rustify/lib"
+
+  install -dm755 "${pkgdir}/usr/bin"
+  cat > "${pkgdir}/usr/bin/rustify" <<'WRAP'
+#!/usr/bin/env bash
+set -euo pipefail
+export LD_LIBRARY_PATH="/opt/rustify/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /opt/rustify/rustify.bin "$@"
+WRAP
+  chmod 755 "${pkgdir}/usr/bin/rustify"
+
+  install -Dm644 packaging/linux/rustify.desktop \
+    "${pkgdir}/usr/share/applications/rustify.desktop"
+  for size in 16 32 48 64 128 256; do
+    install -Dm644 "packaging/icons/hicolor/${size}x${size}/apps/rustify.png" \
+      "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/rustify.png"
+  done
+  install -Dm644 packaging/icons/hicolor/scalable/apps/rustify.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/rustify.svg"
+
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

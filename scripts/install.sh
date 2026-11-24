@@ -3,16 +3,35 @@ set -euo pipefail
 
 # Installs Rustify binary and desktop integration files for the current user.
 # Usage:
-#   ./scripts/install.sh [path-to-rustify-binary]
+#   ./scripts/install.sh [--symlink] [path-to-rustify-binary]
+#
+# Options:
+#   --symlink, -l  Symlink the binary instead of copying it. Useful for dev
+#                  builds so the installed command tracks target/release/rustify.
 #
 # Works both from the repository root and from an extracted release archive.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${HOME}/.local"
+SYMLINK=false
+BINARY_ARG=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --symlink|-l) SYMLINK=true ;;
+        -h|--help)
+            sed -n '1,20p' "$0"
+            exit 0
+            ;;
+        *)
+            BINARY_ARG="$arg"
+            ;;
+    esac
+done
 
 # Resolve binary: explicit arg, then ./rustify next to script, then repo target.
-if [[ $# -ge 1 ]]; then
-    BINARY="$1"
+if [[ -n "$BINARY_ARG" ]]; then
+    BINARY="$BINARY_ARG"
 elif [[ -f "$SCRIPT_DIR/rustify" ]]; then
     BINARY="$SCRIPT_DIR/rustify"
 elif [[ -f "$SCRIPT_DIR/../target/release/rustify" ]]; then
@@ -65,7 +84,13 @@ exec "$DIR/rustify.bin" "$@"
 WRAP
     chmod +x "$PREFIX/bin/rustify"
 else
-    install -m755 "$BINARY" "$PREFIX/bin/rustify"
+    if [[ "$SYMLINK" == true ]]; then
+        BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
+        ln -sf "$BINARY_ABS" "$PREFIX/bin/rustify"
+        echo "Symlinked $PREFIX/bin/rustify -> $BINARY_ABS"
+    else
+        install -m755 "$BINARY" "$PREFIX/bin/rustify"
+    fi
     echo "Make sure libmpv is installed on your system (see README)."
 fi
 

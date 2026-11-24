@@ -17,6 +17,16 @@
 
 ## Use agora
 
+| Canal | Comando |
+| --- | --- |
+| Arch / Omarchy (AUR) | `yay -S rustify-bin` ou `paru -S rustify-bin` |
+| macOS (Homebrew) | `brew install --cask 1arley/tap/rustify` |
+| Windows (Winget) | `winget install 1arley.Rustify` |
+| Qualquer plataforma | Baixe em [Releases](https://github.com/1arley/rustify/releases) (instruções abaixo) |
+| Quem usa Rust | `cargo install rustify-player` |
+
+> Os canais de pacote são publicados automaticamente após cada release e podem levar um tempo para aparecer. Veja [packaging/README.md](packaging/README.md).
+
 ### Linux (incluindo Omarchy / Arch)
 
 ```sh
@@ -87,8 +97,15 @@ cargo install rustify-player
 Para adicionar a entrada/ícone no menu a partir do código:
 
 ```sh
-./scripts/install.sh
+./scripts/install.sh              # copia o binário
+./scripts/install.sh --symlink    # cria um link para target/release/rustify (útil em builds de desenvolvimento)
 ```
+
+## Atualizar
+
+- **Gerenciador de pacotes:** `yay -Syu`, `brew upgrade --cask rustify` ou `winget upgrade 1arley.Rustify`.
+- **Arquivo da release:** baixe o novo arquivo em [Releases](https://github.com/1arley/rustify/releases) e rode `./install.sh` de novo (ou substitua a pasta).
+- **No app:** o Rustify consulta a última release pública no GitHub ao abrir (no máximo uma vez a cada 24 horas) e mostra um banner dispensável quando existe uma versão mais nova. Ele nunca baixa nem instala nada sozinho. Em **Biblioteca → Importar → Sobre e atualizações** você verifica manualmente, vê a versão atual ou desliga a verificação.
 
 ## O que você precisa
 
@@ -164,6 +181,7 @@ Consulte [PRIVACY.md](PRIVACY.md) para nomes dos arquivos, retenção, sincroniz
 | `src/catalog.rs` | Busca Audius/YouTube e resolução de faixas importadas |
 | `src/playback.rs`, `src/queue.rs` | Reprodução via libmpv e fila |
 | `src/library.rs` | Persistência local da biblioteca |
+| `src/update.rs` | Aviso passivo de atualização (última release no GitHub, cache de 24 h) |
 | `src/spotify/` | Integração de conta, API e importação de dados do Spotify |
 ## Licença
 

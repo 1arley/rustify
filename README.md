@@ -17,6 +17,16 @@
 
 ## Use it now
 
+| Channel | Command |
+| --- | --- |
+| Arch / Omarchy (AUR) | `yay -S rustify-bin` or `paru -S rustify-bin` |
+| macOS (Homebrew) | `brew install --cask 1arley/tap/rustify` |
+| Windows (Winget) | `winget install 1arley.Rustify` |
+| Any platform | Download from [Releases](https://github.com/1arley/rustify/releases) (instructions below) |
+| Rust users | `cargo install rustify-player` |
+
+> Package channels are published automatically after each release and may take a little while to appear. See [packaging/README.md](packaging/README.md).
+
 ### Linux (including Omarchy / Arch)
 
 ```sh
@@ -87,8 +97,15 @@ cargo install rustify-player
 To add the menu entry/icon from a source checkout:
 
 ```sh
-./scripts/install.sh
+./scripts/install.sh              # copy the binary
+./scripts/install.sh --symlink    # link target/release/rustify instead (handy for dev builds)
 ```
+
+## Updating
+
+- **Package manager:** `yay -Syu`, `brew upgrade --cask rustify` or `winget upgrade 1arley.Rustify`.
+- **Release archive:** download the new archive from [Releases](https://github.com/1arley/rustify/releases) and run `./install.sh` again (or replace the folder).
+- **In the app:** Rustify checks the latest public GitHub release at startup (at most once every 24 hours) and shows a dismissible banner when a newer version exists. It never downloads or installs anything by itself. Use **Library → Import → Sobre e atualizações** to check manually, see the current version, or turn the check off.
 
 ## What you need
 
@@ -164,6 +181,7 @@ See [PRIVACY.md](PRIVACY.md) for filenames, retention, sync, and removal behavio
 | `src/catalog.rs` | Audius/YouTube search and imported-track matching |
 | `src/playback.rs`, `src/queue.rs` | libmpv playback and queue |
 | `src/library.rs` | Local library storage |
+| `src/update.rs` | Passive update notice (latest GitHub release, 24 h cache) |
 | `src/spotify/` | Spotify account integration, API, and data import |
 ## License
 

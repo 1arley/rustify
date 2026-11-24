@@ -17,6 +17,10 @@ O Rustify guarda título, artistas, álbum, duração, identidade e URL da capa.
 
 Arquivos JSON/CSV escolhidos pelo usuário são lidos localmente e convertidos em dados da biblioteca. O Rustify não altera esses arquivos de origem.
 
+## Verificação de atualização
+
+Por padrão, ao abrir o app (no máximo uma vez a cada 24 horas) e quando você pede em **Importar → Sobre e atualizações**, o Rustify faz um `GET` público em `https://api.github.com/repos/1arley/rustify/releases/latest` com o cabeçalho `User-Agent: rustify/<versão>`. Nenhum dado seu, identificador ou telemetria é enviado, e nada é baixado ou instalado: o app só compara versões e, se você pedir, abre a página da release no navegador. Falhas de rede são ignoradas. Desligue a opção **Verificar atualizações ao abrir** na mesma tela para não fazer essa consulta automática.
+
 ## Armazenamento
 
 As pastas seguem as convenções de cada sistema operacional por meio de `dirs`:
@@ -30,6 +34,7 @@ Arquivos usados:
 - `client_id` e `token.json` na pasta de configuração. O token contém credenciais OAuth e é removido ao desconectar o Client ID configurado.
 - `spotify-account.json` na pasta de dados. Guarda o último snapshot completo da conta e as correspondências YouTube pertencentes a esse snapshot.
 - `liked-tracks.json`, `playlists.json` e `resolved-tracks.json` na pasta de dados. Guardam a biblioteca local, playlists criadas ou importadas e suas correspondências.
+- `update-check.json` na pasta de dados. Guarda `enabled` (verificação ligada ou desligada), `last_checked_at`, `dismissed_version` e `latest_seen` para o aviso de nova versão.
 - `playback-session.json` na pasta de dados. Guarda a última faixa e posição para restaurar o player pausado na próxima abertura; a fila não é persistida.
 
 Os dados ficam neste dispositivo e não expiram automaticamente. Uma sincronização substitui o snapshot da conta só depois de terminar. Uma falha mantém o snapshot anterior.

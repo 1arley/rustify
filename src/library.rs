@@ -182,6 +182,17 @@ pub(crate) fn save_playback_session(session: &PlaybackSession) -> Result<(), Str
     save_playback_session_at(&storage_path("playback-session.json")?, session)
 }
 
+pub(crate) fn clear_playback_session() -> Result<(), String> {
+    let _guard = library_lock().lock().unwrap_or_else(|e| e.into_inner());
+    match fs::remove_file(storage_path("playback-session.json")?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Não foi possível limpar a sessão do player: {error}"
+        )),
+    }
+}
+
 fn load_playback_session_at(path: &Path) -> Result<Option<PlaybackSession>, String> {
     let session = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<PlaybackSession>(&bytes)

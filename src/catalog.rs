@@ -1409,6 +1409,7 @@ fn resolve_spotify_to_youtube_inner(
 }
 
 /// Resolve a URL temporária de áudio para uma faixa do YouTube sem baixar o arquivo.
+#[cfg(test)]
 pub(crate) fn youtube_media_url(video_id: &str) -> Result<String, String> {
     youtube_media_url_inner(video_id, None)
 }

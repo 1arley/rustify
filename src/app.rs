@@ -68,6 +68,12 @@ enum ActivePage {
     About,
 }
 
+#[derive(Clone, Copy)]
+enum SearchSource {
+    Youtube,
+    Audius,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SeekSlider {
     Page,
@@ -119,6 +125,9 @@ struct Home {
     library_loaded: bool,
     library_error: Option<String>,
     searching: bool,
+    search_generation: u64,
+    search_songs: Option<Result<Vec<Track>, String>>,
+    search_audius: Option<Result<Vec<Track>, String>>,
     importing: bool,
     import_notice: Option<(String, bool)>,
     pending_file_path: Option<String>,
@@ -286,6 +295,9 @@ impl Home {
             library_loaded,
             library_error,
             searching: false,
+            search_generation: 0,
+            search_songs: None,
+            search_audius: None,
             importing: false,
             import_notice: None,
             pending_file_path: None,
@@ -658,31 +670,115 @@ impl Home {
             return;
         }
 
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let search_generation = self.search_generation;
         self.searching = true;
         self.results.clear();
+        self.search_songs = None;
+        self.search_audius = None;
         self.message = None;
         cx.notify();
+        let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { catalog::search_all(&query) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.searching = false;
-                match result {
-                    Ok(results) => {
-                        view.results = results;
-                        if view.results.is_empty() {
-                            view.message =
-                                Some("Nenhuma faixa reproduzível encontrada.".to_owned());
+            loop {
+                match progress_receiver.try_recv() {
+                    Ok(track) => {
+                        if this
+                            .update(cx, |view, cx| {
+                                if view.search_generation == search_generation {
+                                    view.results = catalog::merge_search_results(
+                                        std::mem::take(&mut view.results),
+                                        vec![track],
+                                    );
+                                    cx.notify();
+                                }
+                            })
+                            .is_err()
+                        {
+                            break;
                         }
                     }
-                    Err(error) => view.message = Some(error),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(50))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                 }
-                cx.notify();
-            });
+            }
         })
         .detach();
+        for source in [SearchSource::Youtube, SearchSource::Audius] {
+            let source_query = query.clone();
+            let final_query = query.clone();
+            let progress = matches!(source, SearchSource::Youtube).then(|| progress_sender.clone());
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        match source {
+                            SearchSource::Youtube => {
+                                catalog::search_youtube_music_tracks_with_progress(
+                                    &source_query,
+                                    |track| {
+                                        if let Some(sender) = &progress {
+                                            let _ = sender.send(track);
+                                        }
+                                    },
+                                )
+                            }
+                            SearchSource::Audius => catalog::search_audius_tracks(&source_query),
+                        }
+                    })
+                    .await;
+                let sources = this
+                    .update(cx, |view, cx| {
+                        let partial = result.as_ref().cloned().unwrap_or_default();
+                        match source {
+                            SearchSource::Youtube => view.search_songs = Some(result),
+                            SearchSource::Audius => view.search_audius = Some(result),
+                        }
+                        view.results = catalog::merge_search_results(
+                            std::mem::take(&mut view.results),
+                            partial,
+                        );
+                        let sources = if view.search_songs.is_some() && view.search_audius.is_some()
+                        {
+                            view.search_songs.take().zip(view.search_audius.take())
+                        } else {
+                            None
+                        };
+                        cx.notify();
+                        sources
+                    })
+                    .ok()
+                    .flatten();
+                let Some((songs, audius)) = sources else {
+                    return;
+                };
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { catalog::finish_search(&final_query, songs, audius) })
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    view.searching = false;
+                    match result {
+                        Ok(results) => {
+                            if !results.is_empty() || view.results.is_empty() {
+                                view.results = results;
+                            }
+                            if view.results.is_empty() {
+                                view.message =
+                                    Some("Nenhuma faixa reproduzível encontrada.".to_owned());
+                            }
+                        }
+                        Err(error) => view.message = Some(error),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     fn play_track(&mut self, queue: &[Track], selected: usize, cx: &mut Context<Self>) {
@@ -1636,11 +1732,25 @@ impl Home {
     fn search_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.track_rows(&self.results, cx);
         let content = if self.searching {
-            div()
+            let status = div()
                 .text_sm()
                 .text_color(rgb(INFO))
-                .child("Pesquisando faixas…")
-                .into_any_element()
+                .child(if self.results.is_empty() {
+                    "Pesquisando faixas…"
+                } else {
+                    "Buscando mais faixas…"
+                });
+            if self.results.is_empty() {
+                status.into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(status)
+                    .child(rows)
+                    .into_any_element()
+            }
         } else if self.results.is_empty() && self.message.is_none() {
             status_card(
                 "Encontre sua próxima música",
@@ -1675,6 +1785,8 @@ impl Home {
                     .child(div().text_sm().text_color(rgb(MUTED)).child(
                         if self.results.is_empty() {
                             "Sua próxima faixa começa na busca acima.".to_owned()
+                        } else if self.searching {
+                            format!("{} músicas encontradas até agora", self.results.len())
                         } else {
                             format!("{} músicas encontradas", self.results.len())
                         },
@@ -3002,6 +3114,11 @@ impl Home {
         let queue: std::rc::Rc<[Track]> = tracks.into();
         let play_single_seed = self.active_page == ActivePage::Search;
         let rows = tracks.iter().cloned().enumerate().map(|(index, track)| {
+            let track_element_id = if play_single_seed {
+                gpui::ElementId::Name(String::from(track.id.clone()).into())
+            } else {
+                gpui::ElementId::named_usize("track-row", index)
+            };
             let is_current = self
                 .playback
                 .current_index
@@ -3055,7 +3172,7 @@ impl Home {
             let show_playlist_picker = self.playlist_picker_track.as_ref() == Some(&picker_id);
 
             let mut actions = div().flex_none().flex().items_center().gap_2().child(
-                action_button_when(("track-like", index), !is_account_liked)
+                action_button_when((track_element_id.clone(), "like"), !is_account_liked)
                     .ghost()
                     .compact()
                     .disabled(is_account_liked)
@@ -3071,7 +3188,7 @@ impl Home {
             );
             actions = actions
                 .child(
-                    action_button(("track-add-playlist", index))
+                    action_button((track_element_id.clone(), "add-playlist"))
                         .ghost()
                         .compact()
                         .child(svg_icon("icons/plus.svg", INFO, 14.0))
@@ -3087,7 +3204,7 @@ impl Home {
                         })),
                 )
                 .child(
-                    action_button(("track-queue", index))
+                    action_button((track_element_id.clone(), "queue"))
                         .ghost()
                         .compact()
                         .child(svg_icon("icons/plus.svg", MUTED, 14.0))
@@ -3097,7 +3214,7 @@ impl Home {
                         })),
                 )
                 .child(
-                    action_button(("track-play", index))
+                    action_button((track_element_id.clone(), "play"))
                         .primary()
                         .bg(rgb(PRIMARY))
                         .text_color(rgb(0xffffff))
@@ -3114,7 +3231,7 @@ impl Home {
                 );
 
             let row = div()
-                .id(("track-row", index))
+                .id(track_element_id.clone())
                 .w_full()
                 .h(px(60.0))
                 .flex_none()
@@ -3149,7 +3266,7 @@ impl Home {
                                         .child(
                                             MarqueeText::new(
                                                 track.name.clone(),
-                                                ("track-row-title", index),
+                                                (track_element_id.clone(), "title"),
                                             )
                                             .render(),
                                         ),
@@ -3170,7 +3287,7 @@ impl Home {
                         .px_4()
                         .py_2()
                         .child(
-                            action_button(("track-create-playlist", index))
+                            action_button((track_element_id.clone(), "create-playlist"))
                                 .ghost()
                                 .label("Crie uma playlist na Biblioteca")
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -3184,8 +3301,7 @@ impl Home {
                         .local_playlists
                         .iter()
                         .cloned()
-                        .enumerate()
-                        .map(|(playlist_index, playlist)| {
+                        .map(|playlist| {
                             let playlist_id = playlist.id.clone();
                             let track = picker_track.clone();
                             let added = playlist
@@ -3199,8 +3315,8 @@ impl Home {
                             };
                             action_button_when(
                                 (
-                                    "track-playlist",
-                                    index * self.local_playlists.len() + playlist_index,
+                                    track_element_id.clone(),
+                                    format!("playlist-{}", playlist.id),
                                 ),
                                 !added,
                             )

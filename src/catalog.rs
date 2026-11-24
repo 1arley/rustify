@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -110,6 +111,10 @@ fn search_tracks(query: &str) -> Result<Vec<Track>, String> {
         .append_pair("limit", "20")
         .append_pair("app_name", APP_NAME);
     fetch_audius_list(url, 20)
+}
+
+pub(crate) fn search_audius_tracks(query: &str) -> Result<Vec<Track>, String> {
+    search_tracks(query)
 }
 
 fn fetch_audius_track(track_id: &str) -> Result<Track, String> {
@@ -245,6 +250,65 @@ fn run_yt_dlp_with_flat_playlist(
     run_yt_dlp_with_flat_playlist_cancellable(target, limit, flat_playlist, None)
 }
 
+fn run_yt_dlp_with_progress(
+    target: &str,
+    limit: usize,
+    flat_playlist: bool,
+    mut on_track: impl FnMut(Track),
+) -> Result<Vec<Track>, String> {
+    let limit_arg = limit.to_string();
+    let mut command = yt_dlp_command();
+    command.args([
+        "--ignore-config",
+        "--socket-timeout",
+        "10",
+        "--retries",
+        "1",
+        "--skip-download",
+        "--playlist-end",
+        &limit_arg,
+        "--dump-json",
+    ]);
+    if flat_playlist {
+        command.arg("--flat-playlist");
+    }
+    command.args(["--", target]);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Busca do YouTube requer yt-dlp: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Busca do YouTube não retornou resultados.".to_owned())?;
+    let mut tracks = Vec::new();
+    for row in BufReader::new(stdout).split(b'\n') {
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Busca do YouTube requer yt-dlp: {error}"));
+            }
+        };
+        let Ok(video) = serde_json::from_slice::<YoutubeResult>(&row) else {
+            continue;
+        };
+        if let Some(track) = track_from_youtube_result(video) {
+            on_track(track.clone());
+            tracks.push(track);
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("Busca do YouTube requer yt-dlp: {error}"))?;
+    if !status.success() {
+        return Err("O YouTube não respondeu à busca.".into());
+    }
+    Ok(tracks)
+}
+
 fn run_yt_dlp_with_flat_playlist_cancellable(
     target: &str,
     limit: usize,
@@ -339,6 +403,14 @@ fn youtube_music_tracks(query: &str, section: &str) -> Result<Vec<Track>, String
     run_yt_dlp_with_flat_playlist(&url, 12, false)
 }
 
+pub(crate) fn search_youtube_music_tracks_with_progress(
+    query: &str,
+    on_track: impl FnMut(Track),
+) -> Result<Vec<Track>, String> {
+    let url = youtube_music_search_url(query, "songs")?;
+    run_yt_dlp_with_progress(&url, 12, false, on_track)
+}
+
 fn prioritized_search_results(
     songs: Vec<Track>,
     audius: Vec<Track>,
@@ -356,14 +428,23 @@ fn prioritized_search_results(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn search_all(query: &str) -> Result<Vec<Track>, String> {
     let (youtube, audius) = std::thread::scope(|scope| {
         let youtube = scope.spawn(|| youtube_music_tracks(query, "songs"));
-        let audius = scope.spawn(|| search_tracks(query));
+        let audius = scope.spawn(|| search_audius_tracks(query));
         (youtube.join(), audius.join())
     });
     let youtube = youtube.unwrap_or_else(|_| Err("A busca do YouTube falhou.".to_owned()));
     let audius = audius.unwrap_or_else(|_| Err("A busca do Audius falhou.".to_owned()));
+    finish_search(query, youtube, audius)
+}
+
+pub(crate) fn finish_search(
+    query: &str,
+    youtube: Result<Vec<Track>, String>,
+    audius: Result<Vec<Track>, String>,
+) -> Result<Vec<Track>, String> {
     let (songs, songs_error) =
         youtube.map_or_else(|error| (Vec::new(), Some(error)), |tracks| (tracks, None));
     let (audius, audius_error) =
@@ -400,7 +481,7 @@ pub(crate) fn search_all(query: &str) -> Result<Vec<Track>, String> {
     ))
 }
 
-fn merge_search_results(mut tracks: Vec<Track>, incoming: Vec<Track>) -> Vec<Track> {
+pub(crate) fn merge_search_results(mut tracks: Vec<Track>, incoming: Vec<Track>) -> Vec<Track> {
     for track in incoming {
         let title = canonical_song_title(&track.name, track.artist_names());
         let artist = normalize_artist(track.artist_names(), &track.name);

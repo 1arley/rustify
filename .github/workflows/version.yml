@@ -38,4 +38,4 @@ jobs:
           git tag "v${{ steps.bump.outputs.version }}"
           git push origin HEAD:main
           git push origin "v${{ steps.bump.outputs.version }}"
-          gh workflow run release.yml --ref "v${{ steps.bump.outputs.version }}"
+          # release.yml dispara automaticamente pelo push da tag (on: push: tags: v*)

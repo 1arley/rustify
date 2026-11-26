@@ -3,483 +3,77 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
-  workflow_dispatch:
-
-permissions:
-  contents: read
+      - 'v*'
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            asset: rustify-linux-x86_64.tar.gz
-            ytdlp_url: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
-            ytdlp_name: yt-dlp
-          - os: windows-2025
-            target: x86_64-pc-windows-gnu
-            asset: rustify-windows-x86_64.zip
-            ytdlp_url: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
-            ytdlp_name: yt-dlp.exe
-          - os: macos-15
-            target: aarch64-apple-darwin
-            asset: rustify-macos-aarch64.tar.gz
-            ytdlp_url: https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
-            ytdlp_name: yt-dlp
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux native libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libfreetype6-dev \
-            libmpv-dev \
-            libwayland-dev \
-            libx11-xcb-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            pkg-config
-
-      - name: Install Windows native libraries
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        id: msys2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-mpv
-            mingw-w64-ucrt-x86_64-ntldd
-
-      - name: Add Windows native tools to PATH
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
-
-      - name: Install macOS native libraries
-        if: runner.os == 'macOS'
-        run: |
-          brew install mpv
-          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
-
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Prepare package (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pkg="dist/${{ matrix.asset }}"
-          name="${pkg%.tar.gz}"
-          name="$(basename "$name")"
-          mkdir -p "stage/$name/lib"
-          cp "target/${{ matrix.target }}/release/rustify" "stage/$name/rustify.bin"
-          curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
-          chmod +x "stage/$name/rustify.bin" "stage/$name/${{ matrix.ytdlp_name }}"
-          cp LICENSE "stage/$name/LICENSE"
-
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            # Bundle libmpv and most non-glibc shared libs for portability.
-            cat > /tmp/bundle_libs.py << 'PY'
-          import os, re, shutil, subprocess, sys
-          exe, libdir = sys.argv[1], sys.argv[2]
-          exclude = re.compile(r'linux-vdso|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libgcc_s\.so|libstdc\+\+\.so')
-          seen = set()
-          queue = [exe]
-          while queue:
-              cur = queue.pop()
-              out = subprocess.check_output(["ldd", cur], text=True, errors="ignore")
-              for line in out.splitlines():
-                  if "not found" in line.lower():
-                      raise SystemExit(f"Unresolved dependency for {cur}: {line.strip()}")
-                  m = re.search(r'=>\s*(/[^\s]+)', line)
-                  if not m:
-                      continue
-                  path = m.group(1)
-                  base = os.path.basename(path)
-                  if exclude.search(base):
-                      continue
-                  if path in seen:
-                      continue
-                  if not os.path.isfile(path):
-                      raise SystemExit(f"Dependency path does not exist: {path}")
-                  seen.add(path)
-                  shutil.copy2(path, os.path.join(libdir, base))
-                  queue.append(path)
-          print(f"Bundled {len(seen)} libs")
-          if not any(os.path.basename(path).startswith("libmpv.so") for path in seen):
-              raise SystemExit("libmpv was not included in the package")
-          PY
-            python3 /tmp/bundle_libs.py "stage/$name/rustify.bin" "stage/$name/lib"
-            cat > "stage/$name/rustify" << 'SH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          exec "$DIR/rustify.bin" "$@"
-          SH
-            chmod +x "stage/$name/rustify"
-            cp scripts/install.sh "stage/$name/install.sh"
-            chmod +x "stage/$name/install.sh"
-            mkdir -p "stage/$name/packaging"
-            cp -r packaging/linux packaging/icons "stage/$name/packaging/"
-          else
-            mv "stage/$name/rustify.bin" "stage/$name/rustify"
-          fi
-
-          mkdir -p dist
-          tar -czf "dist/${{ matrix.asset }}" -C stage "$name"
-
-      - name: Prepare package (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          name="rustify-windows-x86_64"
-          mkdir -p "stage/$name" dist
-          cp "target/${{ matrix.target }}/release/rustify.exe" "stage/$name/"
-          cp LICENSE "stage/$name/LICENSE"
-          curl -L "${{ matrix.ytdlp_url }}" -o "stage/$name/${{ matrix.ytdlp_name }}"
-          # Bundle required MSYS2/UCRT64 DLLs so users don't need to install mpv.
-          cat > /tmp/bundle_dlls.py << 'PY'
-          import os, re, shutil, subprocess, sys
-          exe, out = sys.argv[1], sys.argv[2]
-          seen = set()
-          try:
-              text = subprocess.check_output(["ntldd", "-R", exe], text=True, errors="ignore")
-          except Exception as e:
-              print(e, file=sys.stderr)
-              raise SystemExit("Could not inspect Windows DLL dependencies")
-          if "not found" in text.lower():
-              raise SystemExit("ntldd reported an unresolved DLL dependency")
-          for line in text.splitlines():
-              m = re.search(r'=>\s*([^\(]+)', line)
-              if not m:
-                  continue
-              path = m.group(1).strip().strip('"').replace("\\", "/")
-              if "ucrt64/bin/" not in path.lower():
-                  continue
-              if re.match(r'^/[a-zA-Z]/', path):
-                  path = path[1] + ":" + path[2:]
-              if path.lower() in seen:
-                  continue
-              if not os.path.isfile(path):
-                  raise SystemExit(f"Dependency path does not exist: {path}")
-              shutil.copy2(path, out)
-              seen.add(path.lower())
-          required = ["libmpv-2.dll","libwinpthread-1.dll","libgcc_s_seh-1.dll","libstdc++-6.dll"]
-          for dll in required:
-              for root in ["/ucrt64/bin", "C:/msys64/ucrt64/bin"]:
-                  p = os.path.join(root, dll)
-                  if os.path.isfile(p) and p.lower() not in seen:
-                      shutil.copy2(p, out)
-                      seen.add(p.lower())
-                      break
-          missing = [dll for dll in required if not os.path.isfile(os.path.join(out, dll))]
-          if missing:
-              raise SystemExit(f"Missing required DLLs: {', '.join(missing)}")
-          print(f"Bundled {len(seen)} DLLs")
-          PY
-          python3 /tmp/bundle_dlls.py "target/${{ matrix.target }}/release/rustify.exe" "stage/$name" \
-            || python /tmp/bundle_dlls.py "target/${{ matrix.target }}/release/rustify.exe" "stage/$name"
-          pwsh -Command "Compress-Archive -Path 'stage/$name/*' -DestinationPath 'dist/${{ matrix.asset }}'"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
-
-  publish:
-    needs: build
+  create-release:
+    name: Create Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Generate checksums
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum rustify-* > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-
-      - name: Upload checksums for package jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: checksums
-          path: dist/SHA256SUMS.txt
-
-      - name: Publish release
+      - name: Create GitHub Release
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
           generate_release_notes: true
+          draft: false
+          prerelease: false
 
-  # Package channels run after the GitHub release exists and never block it.
-  package-manifests:
-    needs: publish
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    permissions:
-      contents: read
-    outputs:
-      rendered: ${{ steps.render.outputs.rendered }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download checksums
-        uses: actions/download-artifact@v4
-        with:
-          name: checksums
-          path: checksums
-
-      - name: Check package name collisions (read-only)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 scripts/check_package_names.py \
-            --strict \
-            --aur-pkgname "${{ vars.AUR_PKGNAME || 'rustify' }}" \
-            --homebrew-token "${{ vars.HOMEBREW_TOKEN || 'rustify' }}" \
-            --winget-id "${{ vars.WINGET_ID || '1arley.Rustify' }}"
-
-      - name: Render package files
-        id: render
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
-          fi
-          python3 scripts/render_packaging.py \
-            --version "$version" \
-            --checksums-file checksums/SHA256SUMS.txt \
-            --aur-pkgname "${{ vars.AUR_PKGNAME || 'rustify' }}" \
-            --homebrew-token "${{ vars.HOMEBREW_TOKEN || 'rustify' }}" \
-            --winget-id "${{ vars.WINGET_ID || '1arley.Rustify' }}" \
-            --out-dir dist-packaging
-          echo "rendered=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload rendered package files
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-manifests
-          path: dist-packaging
-
-  publish-aur:
-    needs: package-manifests
-    if: startsWith(github.ref, 'refs/tags/v') && needs.package-manifests.outputs.rendered == 'true'
-    permissions: {}
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Download rendered package files
-        uses: actions/download-artifact@v4
-        with:
-          name: package-manifests
-          path: dist-packaging
-
-      - name: Generate .SRCINFO
-        run: |
-          set -euo pipefail
-          docker run --rm -v "$PWD/dist-packaging/aur:/pkg:ro" archlinux:base-devel bash -euc '
-            useradd -m builder
-            cp /pkg/PKGBUILD /home/builder/PKGBUILD
-            chown builder:builder /home/builder/PKGBUILD
-            su builder -c "cd /home/builder && makepkg --printsrcinfo"
-          ' > dist-packaging/aur/.SRCINFO
-          grep -q '^pkgbase = ' dist-packaging/aur/.SRCINFO
-
-      - name: Push to AUR
-        env:
-          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
-          AUR_PKGNAME: ${{ vars.AUR_PKGNAME || 'rustify' }}
-        run: |
-          set -euo pipefail
-          if [ -z "${AUR_SSH_KEY:-}" ]; then
-            echo "::notice::AUR_SSH_KEY not configured; skipping AUR publish."
-            exit 0
-          fi
-          install -d -m700 ~/.ssh
-          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          # Official AUR host key (https://wiki.archlinux.org/title/AUR_submission_guidelines).
-          printf '%s\n' \
-            'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' \
-            > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
-          git clone "ssh://aur@aur.archlinux.org/${AUR_PKGNAME}.git" aur-repo
-          cp dist-packaging/aur/PKGBUILD dist-packaging/aur/.SRCINFO aur-repo/
-          cd aur-repo
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "AUR package already up to date."
-            exit 0
-          fi
-          git commit -m "chore: update to ${GITHUB_REF_NAME}"
-          git push origin HEAD:master
-
-  publish-homebrew:
-    needs: package-manifests
-    if: startsWith(github.ref, 'refs/tags/v') && needs.package-manifests.outputs.rendered == 'true'
-    permissions: {}
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Download rendered package files
-        uses: actions/download-artifact@v4
-        with:
-          name: package-manifests
-          path: dist-packaging
-
-      - name: Update Homebrew tap
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || '1arley/homebrew-tap' }}
-        run: |
-          set -euo pipefail
-          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
-            echo "::notice::HOMEBREW_TAP_TOKEN not configured; skipping Homebrew publish."
-            exit 0
-          fi
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
-          mkdir -p tap/Casks
-          cp dist-packaging/homebrew/Casks/*.rb tap/Casks/
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks
-          if git diff --cached --quiet; then
-            echo "Tap already up to date."
-            exit 0
-          fi
-          git commit -m "rustify ${GITHUB_REF_NAME}"
-          git push
-
-  publish-winget:
-    needs: package-manifests
-    if: startsWith(github.ref, 'refs/tags/v') && needs.package-manifests.outputs.rendered == 'true'
-    permissions: {}
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Download rendered package files
-        uses: actions/download-artifact@v4
-        with:
-          name: package-manifests
-          path: dist-packaging
-
-      - name: Open winget-pkgs pull request
-        env:
-          GH_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
-          WINGET_ID: ${{ vars.WINGET_ID || '1arley.Rustify' }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::notice::WINGET_GITHUB_TOKEN not configured; skipping Winget publish."
-            exit 0
-          fi
-          version="${GITHUB_REF_NAME#v}"
-          publisher="${WINGET_ID%%.*}"
-          first="${publisher:0:1}"
-          first="${first,,}"
-          pkg_path="${WINGET_ID#*.}"
-          pkg_path="${pkg_path//./\/}"
-          manifest_dir="manifests/${first}/${publisher}/${pkg_path}"
-          user="$(gh api user -q .login)"
-          gh repo view "${user}/winget-pkgs" >/dev/null 2>&1 \
-            || gh repo fork microsoft/winget-pkgs --clone=false
-
-          # Branch from upstream so a stale fork never causes conflicts.
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/microsoft/winget-pkgs.git winget-pkgs
-          cd winget-pkgs
-          git sparse-checkout set "$manifest_dir"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          branch="${WINGET_ID}-${version}"
-          git checkout -B "$branch"
-          cp -r ../dist-packaging/winget/manifests/. manifests/
-          git add manifests
-          if git diff --cached --quiet; then
-            echo "Manifests already up to date."
-            exit 0
-          fi
-          if [ -d "$manifest_dir" ] && [ -n "$(ls -A "$manifest_dir" 2>/dev/null | grep -v "^${version}$" || true)" ]; then
-            title="New version: ${WINGET_ID} version ${version}"
-          else
-            title="New package: ${WINGET_ID} version ${version}"
-          fi
-          git commit -m "$title"
-          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${user}/winget-pkgs.git"
-          git push --force fork "$branch"
-          existing="$(gh pr list --repo microsoft/winget-pkgs --head "${user}:${branch}" --state open --json url -q '.[0].url')"
-          if [ -n "$existing" ]; then
-            echo "Updated existing pull request: $existing"
-          else
-            gh pr create --repo microsoft/winget-pkgs \
-              --head "${user}:${branch}" --base master \
-              --title "$title" \
-              --body "Automated submission from the Rustify release workflow."
-          fi
-
-  publish-crate:
+  build-linux:
+    name: Build Linux (x86_64)
+    needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install native dependencies
+      - name: Install System Dependencies (libmpv, etc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libfreetype6-dev \
-            libmpv-dev \
-            libwayland-dev \
-            libx11-xcb-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            pkg-config
+          sudo apt-get install -y libmpv-dev libasound2-dev libssl-dev libfontconfig1-dev
 
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          tar -czf rustify-linux-x86_64.tar.gz -C target/release rustify
+          mv rustify-linux-x86_64.tar.gz dist/
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/rustify-linux-x86_64.tar.gz
+
+  build-windows:
+    name: Build Windows (x86_64)
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Compress-Archive -Path target/release/rustify.exe -DestinationPath dist/rustify-windows-x86_64.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/rustify-windows-x86_64.zip

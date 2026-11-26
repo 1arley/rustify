@@ -347,7 +347,7 @@ fn load_token(client_id: &str) -> Result<Option<TokenRecord>, String> {
 
 fn save_token(client_id: &str, token: &TokenRecord) -> Result<(), String> {
     let path = token_path()?;
-    let mut store = load_token_store(&path).unwrap_or_default();
+    let mut store = load_token_store(&path)?;
     store.insert(client_id.to_owned(), token.clone());
     write_token_store(&path, &store)
 }

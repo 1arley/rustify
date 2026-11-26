@@ -162,6 +162,21 @@ impl Queue {
             return self.selected;
         }
         if self.shuffle && self.entries.len() > 1 {
+            if let Some(next) = self
+                .entries
+                .iter()
+                .filter(|e| {
+                    Some(e.id) != self.selected
+                        && !self.failed.contains(&e.id)
+                        && !self.history.contains(&e.id)
+                })
+                .choose(&mut rand::rng())
+            {
+                return Some(next.id);
+            }
+            if self.repeat == Repeat::Off {
+                return None;
+            }
             return self
                 .entries
                 .iter()

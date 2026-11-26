@@ -202,6 +202,8 @@ fn player() -> &'static Player {
 fn engine() -> Result<Mpv, String> {
     Mpv::with_initializer(|init| {
         init.set_option("vid", "no")?;
+        init.set_option("loop-file", "no")?;
+        init.set_option("loop-playlist", "no")?;
         init.set_option("ytdl-format", "ba/b")?;
         init.set_option("ytdl", true)
     })
@@ -210,6 +212,8 @@ fn engine() -> Result<Mpv, String> {
 fn standby_engine(url: &str, volume: f64) -> Result<Mpv, String> {
     let mpv = Mpv::with_initializer(|init| {
         init.set_option("vid", "no")?;
+        init.set_option("loop-file", "no")?;
+        init.set_option("loop-playlist", "no")?;
         init.set_option("pause", true)?;
         init.set_option("cache", true)?;
         init.set_option("cache-on-disk", false)?;
@@ -410,6 +414,7 @@ struct Worker {
     identity_resolving: bool,
     stream_resolving: bool,
     stream_generation: u64,
+    stream_fallback: Option<String>,
     resolved_identity: Option<(String, String)>,
     loading_since: Option<Instant>,
 }
@@ -469,6 +474,7 @@ impl Worker {
         }
         self.stream_cancel = None;
         self.stream_resolving = false;
+        self.stream_fallback = None;
         self.planned_next = None;
         self.preloaded = None;
         self.preloader = None;
@@ -656,6 +662,24 @@ impl Worker {
         }
         false
     }
+    fn retry_source_stream(&mut self, error: &str) -> bool {
+        let Some(url) = self.stream_fallback.take() else {
+            return false;
+        };
+        eprintln!("playback direct stream failed; retrying source URL: {error}");
+        match self.load_stream(&url) {
+            Ok(()) => {
+                self.pending_seek = (self.resume_position > 0).then_some(self.resume_position);
+                self.resume_position = 0;
+            }
+            Err(error) => {
+                if self.fail(error) {
+                    self.start(true);
+                }
+            }
+        }
+        true
+    }
     fn invalidate_preload(&mut self) {
         self.prepare_generation += 1;
         if let Some(cancelled) = &self.preparation_cancel {
@@ -764,6 +788,7 @@ impl Worker {
                         .and_then(|mpv| mpv.get_property::<bool>("pause").ok())
                         .unwrap_or(true);
                     if !paused {
+                        self.stream_fallback = None;
                         self.phase = Phase::Started;
                         if let Some(started_at) = self.loading_since.take() {
                             let elapsed = started_at.elapsed().as_millis();
@@ -794,27 +819,45 @@ impl Worker {
                         && self.phase == Phase::Started
                         && self.direct_preloaded =>
                 {
-                    self.start(true);
+                    eprintln!("playback promoted stream ended unexpectedly: {reason:?}");
+                    if self.fail(format!("O fluxo de áudio foi interrompido: {reason:?}")) {
+                        self.start(true);
+                    }
                 }
                 Ok(Event::EndFile(reason))
                     if self.phase == Phase::Loading && !self.direct_preloaded =>
                 {
                     if let Some(error) = loading_end_file_error(reason)
+                        && !self.retry_source_stream(error)
                         && self.fail(error.to_owned())
                     {
                         self.start(true);
                     }
                 }
-                Ok(Event::EndFile(_reason))
+                Ok(Event::EndFile(reason))
                     if self.phase == Phase::Loading && self.direct_preloaded =>
                 {
-                    self.start(true);
+                    eprintln!("playback preloaded stream failed to start: {reason:?}");
+                    if self.fail(format!("O fluxo de áudio não iniciou: {reason:?}")) {
+                        self.start(true);
+                    }
                 }
                 Err(e) if matches!(self.phase, Phase::Started | Phase::Loading) => {
-                    if self.direct_preloaded {
-                        self.start(true);
-                    } else if self.fail(e.to_string()) {
-                        self.start(true);
+                    if self.direct_preloaded && self.phase == Phase::Loading {
+                        let error = e.to_string();
+                        eprintln!("playback preloaded stream error: {error}");
+                        if self.fail(error) {
+                            self.start(true);
+                        }
+                    } else {
+                        let error = e.to_string();
+                        eprintln!("playback stream error: {error}");
+                        if self.phase == Phase::Loading && self.retry_source_stream(&error) {
+                            continue;
+                        }
+                        if self.fail(error) {
+                            self.start(true);
+                        }
                     }
                 }
                 _ => {}
@@ -1075,6 +1118,7 @@ fn run_player(
         identity_resolving: false,
         stream_resolving: false,
         stream_generation: 0,
+        stream_fallback: None,
         resolved_identity: None,
         loading_since: None,
     };
@@ -1220,10 +1264,17 @@ fn run_player(
                 ) {
                     worker.stream_resolving = false;
                     worker.stream_cancel = None;
-                    let url = result.unwrap_or_else(|error| {
-                        eprintln!("playback direct stream failed; using MPV ytdl: {error}");
-                        fallback_url
-                    });
+                    let url = match result {
+                        Ok(url) => {
+                            worker.stream_fallback = Some(fallback_url);
+                            url
+                        }
+                        Err(error) => {
+                            eprintln!("playback direct stream failed; using MPV ytdl: {error}");
+                            worker.stream_fallback = None;
+                            fallback_url
+                        }
+                    };
                     match worker.load_stream(&url) {
                         Ok(()) => {
                             worker.pending_seek =
@@ -1231,7 +1282,7 @@ fn run_player(
                             worker.resume_position = 0;
                         }
                         Err(error) => {
-                            if worker.fail(error) {
+                            if !worker.retry_source_stream(&error) && worker.fail(error) {
                                 worker.start(true);
                             }
                         }
@@ -1280,6 +1331,7 @@ mod tests {
             identity_resolving: false,
             stream_resolving: false,
             stream_generation: 0,
+            stream_fallback: None,
             resolved_identity: None,
             loading_since: None,
         }
@@ -1587,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn midtrack_failure_of_a_promoted_stream_retries_through_track_url() {
+    fn midtrack_failure_of_a_promoted_stream_does_not_restart_the_track() {
         let mut worker = worker_for_test();
         let mut current = test_item("abc");
         let mut next = test_item("def");
@@ -1618,9 +1670,10 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(worker.phase == Phase::Loading);
+        assert!(worker.phase == Phase::Failed);
+        assert_eq!(worker.queue.selected, Some(next_id));
+        assert!(worker.notice.is_some());
         assert!(worker.automatic);
-        assert!(!worker.direct_preloaded);
     }
 
     #[test]
@@ -1721,6 +1774,7 @@ mod tests {
             identity_resolving: false,
             stream_resolving: false,
             stream_generation: 0,
+            stream_fallback: None,
             resolved_identity: None,
             loading_since: None,
         };

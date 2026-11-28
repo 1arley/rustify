@@ -1603,6 +1603,41 @@ mod tests {
     }
 
     #[test]
+    fn poll_marks_loading_playback_started_when_progress_is_observed_without_restart_event() {
+        let mut worker = worker_for_test();
+        worker
+            .queue
+            .replace(vec![test_item("abc"), test_item("def")], 0);
+        let mpv = worker.mpv().unwrap();
+        mpv.command("loadfile", &["av://lavfi:anullsrc=d=1", "replace"])
+            .unwrap();
+        mpv.set_property("pause", false).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let _ = mpv.wait_event(0.);
+            if mpv
+                .get_property::<f64>("time-pos")
+                .is_ok_and(|position| position > 0.0)
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            mpv.get_property::<f64>("time-pos")
+                .is_ok_and(|position| position > 0.0),
+            "expected playback progress before fallback assertion"
+        );
+
+        worker.phase = Phase::Loading;
+        worker.loading_since = Some(Instant::now());
+        worker.poll();
+
+        assert!(worker.phase == Phase::Started);
+    }
+
+    #[test]
     fn queue_invalidation_allows_preparing_the_revised_next_entry() {
         let mut worker = worker_for_test();
         let mut current = test_item("abc");

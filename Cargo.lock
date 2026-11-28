@@ -5061,7 +5061,7 @@ dependencies = [
 
 [[package]]
 name = "rustify-player"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",

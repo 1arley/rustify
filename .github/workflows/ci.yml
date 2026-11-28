@@ -62,9 +62,28 @@ jobs:
       - name: Install macOS native libraries
         if: runner.os == 'macOS'
         run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_UPGRADE=1
           brew install mpv
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
           echo "DYLD_LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Show macOS build environment
+        if: runner.os == 'macOS'
+        run: |
+          echo "--- target ---"
+          rustup target list --installed
+          echo "--- clang ---"
+          clang --version | head -1
+          echo "--- mpv pkg-config ---"
+          pkg-config --modversion mpv 2>&1 || echo "pkg-config: mpv not found"
+          echo "--- mpv libs ---"
+          ls "$(brew --prefix)/lib" | grep -i mpv || echo "no mpv .dylib/.a in $(brew --prefix)/lib"
+          echo "--- env ---"
+          echo "LIBRARY_PATH=${LIBRARY_PATH:-<unset>}"
+          echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH:-<unset>}"
+          echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-<unset>}"
 
       - name: Check formatting
         run: cargo fmt --check

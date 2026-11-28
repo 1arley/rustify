@@ -774,11 +774,32 @@ impl Worker {
             return;
         }
     }
+    fn mark_started(&mut self) {
+        self.stream_fallback = None;
+        self.phase = Phase::Started;
+        if let Some(started_at) = self.loading_since.take() {
+            let elapsed = started_at.elapsed().as_millis();
+            if self.direct_preloaded {
+                eprintln!("playback transition-start: {elapsed} ms");
+            } else {
+                eprintln!("playback stream-start: {elapsed} ms");
+            }
+        }
+        self.queue.started();
+        if let Some(position) = self.pending_seek.take() {
+            let seconds = (position as f64 / 1_000_000.0).to_string();
+            if let Ok(mpv) = self.mpv() {
+                let _ = mpv.command("seek", &[&seconds, "absolute"]);
+            }
+        }
+        self.planned_next = None;
+        self.prepare_next();
+    }
     fn poll(&mut self) {
         self.poll_preloader();
         loop {
             let Some(event) = self.mpv().ok().and_then(|mpv| mpv.wait_event(0.)) else {
-                return;
+                break;
             };
             match event {
                 Ok(Event::PlaybackRestart) if self.phase == Phase::Loading => {
@@ -788,25 +809,7 @@ impl Worker {
                         .and_then(|mpv| mpv.get_property::<bool>("pause").ok())
                         .unwrap_or(true);
                     if !paused {
-                        self.stream_fallback = None;
-                        self.phase = Phase::Started;
-                        if let Some(started_at) = self.loading_since.take() {
-                            let elapsed = started_at.elapsed().as_millis();
-                            if self.direct_preloaded {
-                                eprintln!("playback transition-start: {elapsed} ms");
-                            } else {
-                                eprintln!("playback stream-start: {elapsed} ms");
-                            }
-                        }
-                        self.queue.started();
-                        if let Some(position) = self.pending_seek.take() {
-                            let seconds = (position as f64 / 1_000_000.0).to_string();
-                            if let Ok(mpv) = self.mpv() {
-                                let _ = mpv.command("seek", &[&seconds, "absolute"]);
-                            }
-                        }
-                        self.planned_next = None;
-                        self.prepare_next();
+                        self.mark_started();
                     }
                 }
                 Ok(Event::EndFile(libmpv::mpv_end_file_reason::Eof))
@@ -862,6 +865,16 @@ impl Worker {
                 }
                 _ => {}
             }
+        }
+        if self.phase == Phase::Loading
+            && self.mpv().is_ok_and(|mpv| {
+                mpv.get_property::<bool>("pause").ok() == Some(false)
+                    && mpv
+                        .get_property::<f64>("time-pos")
+                        .is_ok_and(|position| position > 0.0)
+            })
+        {
+            self.mark_started();
         }
     }
     fn command(&mut self, command: PlaybackCommand) -> Result<(), String> {

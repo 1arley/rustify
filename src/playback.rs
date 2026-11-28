@@ -1300,10 +1300,45 @@ fn run_player(
 mod tests {
     use super::*;
 
+    // Headless CI runners have no audio device, and mpv aborts or crashes when
+    // it fails to open one. Tests only care about the stream state machine, so
+    // route audio to mpv's null driver.
+    fn test_engine() -> Result<Mpv, String> {
+        Mpv::with_initializer(|init| {
+            init.set_option("vid", "no")?;
+            init.set_option("ao", "null")?;
+            init.set_option("loop-file", "no")?;
+            init.set_option("loop-playlist", "no")?;
+            init.set_option("ytdl-format", "ba/b")?;
+            init.set_option("ytdl", true)
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    fn test_standby_engine(url: &str, volume: f64) -> Result<Mpv, String> {
+        let mpv = Mpv::with_initializer(|init| {
+            init.set_option("vid", "no")?;
+            init.set_option("ao", "null")?;
+            init.set_option("loop-file", "no")?;
+            init.set_option("loop-playlist", "no")?;
+            init.set_option("pause", true)?;
+            init.set_option("cache", true)?;
+            init.set_option("cache-on-disk", false)?;
+            init.set_option("cache-secs", 5)?;
+            init.set_option("demuxer-cache-wait", true)
+        })
+        .map_err(|error| error.to_string())?;
+        mpv.set_property("volume", volume)
+            .map_err(|error| error.to_string())?;
+        mpv.command("loadfile", &[url, "replace"])
+            .map_err(|error| error.to_string())?;
+        Ok(mpv)
+    }
+
     fn worker_for_test() -> Worker {
         Worker {
             queue: Queue::default(),
-            engine: engine(),
+            engine: test_engine(),
             phase: Phase::Started,
             automatic: false,
             notice: None,
@@ -1599,7 +1634,7 @@ mod tests {
             .replace(vec![test_item("abc"), test_item("def")], 0);
         worker.exhausted_at_len = Some(worker.queue.entries.len());
         let next = worker.queue.entries[1].id;
-        let standby = standby_engine("av://lavfi:anullsrc=d=1", 0.).unwrap();
+        let standby = test_standby_engine("av://lavfi:anullsrc=d=1", 0.).unwrap();
         wait_for_file_loaded(&standby);
         assert!(standby.get_property::<bool>("pause").unwrap());
 
@@ -1626,7 +1661,7 @@ mod tests {
         );
         worker.exhausted_at_len = Some(worker.queue.entries.len());
         let next = worker.queue.entries[1].id;
-        let standby = standby_engine("av://lavfi:anullsrc=d=1", 0.).unwrap();
+        let standby = test_standby_engine("av://lavfi:anullsrc=d=1", 0.).unwrap();
         wait_for_file_loaded(&standby);
         worker.preloaded = Some((worker.queue_revision, next));
         worker.preloader_ready = true;
@@ -1648,7 +1683,7 @@ mod tests {
         worker.queue.replace(vec![current, next], 0);
         worker.exhausted_at_len = Some(worker.queue.entries.len());
         let next_id = worker.queue.entries[1].id;
-        let standby = standby_engine("av://lavfi:anullsrc=d=10", 0.).unwrap();
+        let standby = test_standby_engine("av://lavfi:anullsrc=d=10", 0.).unwrap();
         wait_for_file_loaded(&standby);
         worker.preloaded = Some((worker.queue_revision, next_id));
         worker.preloader_ready = true;
@@ -1685,7 +1720,8 @@ mod tests {
         worker.preloaded = Some((worker.queue_revision, worker.queue.entries[1].id));
         let missing =
             std::env::temp_dir().join(format!("rustify-missing-{}", rand::random::<u64>()));
-        worker.preloader = Some(standby_engine(missing.to_string_lossy().as_ref(), 0.).unwrap());
+        worker.preloader =
+            Some(test_standby_engine(missing.to_string_lossy().as_ref(), 0.).unwrap());
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while worker.preloader.is_some() && Instant::now() < deadline {
@@ -1701,7 +1737,7 @@ mod tests {
     #[ignore = "consulta o YouTube e abre uma URL temporária pelo libmpv"]
     fn youtube_standby_loads_the_direct_stream_while_paused() {
         let url = crate::catalog::youtube_media_url("5NV6Rdv1a3I").unwrap();
-        let mpv = standby_engine(&url, 0.).unwrap();
+        let mpv = test_standby_engine(&url, 0.).unwrap();
         wait_for_file_loaded(&mpv);
         assert!(mpv.get_property::<bool>("pause").unwrap());
     }
@@ -1746,7 +1782,7 @@ mod tests {
         };
         let mut worker = Worker {
             queue: Queue::default(),
-            engine: engine(),
+            engine: test_engine(),
             phase: Phase::Loading,
             automatic: false,
             notice: None,
